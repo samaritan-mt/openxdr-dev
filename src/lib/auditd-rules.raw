@@ -1,0 +1,106 @@
+## === SUSPICIOUS SUDO USAGE =======================================
+
+# Log all sudo executions
+-a always,exit -F arch=b64 -S execve -F exe=/usr/bin/sudo -k suspicious-sudo
+-a always,exit -F arch=b32 -S execve -F exe=/usr/bin/sudo -k suspicious-sudo
+
+# Log cases where uid != 0 when invoking sudo (potential abuse)
+-a always,exit -F arch=b64 -S execve -F exe=/usr/bin/sudo -F euid!=0 -k suspicious-sudo-nonroot
+-a always,exit -F arch=b32 -S execve -F exe=/usr/bin/sudo -F euid!=0 -k suspicious-sudo-nonroot
+
+
+## === FAILED LOGIN / AUTH FILES ===================================
+
+# Watch failed login log (location varies by distro; adjust if needed)
+-w /var/log/btmp -p wa -k failed-logins
+-w /var/log/faillog -p wa -k failed-logins
+
+# Watch auth logs (again, adjust to your distro as needed)
+-w /var/log/auth.log -p wa -k auth-log
+-w /var/log/secure  -p wa -k auth-log
+
+
+## === CRITICAL SYSTEM FILE MODIFICATIONS ==========================
+
+# Changes to passwd, shadow, group, gshadow
+-w /etc/passwd  -p wa -k identity-change
+-w /etc/shadow  -p wa -k identity-change
+-w /etc/group   -p wa -k identity-change
+-w /etc/gshadow -p wa -k identity-change
+
+# Changes to sudoers and sudoers.d
+-w /etc/sudoers        -p wa -k sudoers-change
+-w /etc/sudoers.d      -p wa -k sudoers-change
+
+# Changes to PAM configuration
+-w /etc/pam.d          -p wa -k pam-change
+
+# Changes to SSH server/client config
+-w /etc/ssh/sshd_config -p wa -k ssh-config-change
+-w /etc/ssh/ssh_config  -p wa -k ssh-config-change
+
+
+## === EXECUTION IN PRIVILEGED DIRECTORIES =========================
+
+# Any execution in /sbin and /usr/sbin (usually admin-only tools)
+-a always,exit -F arch=b64 -S execve -F dir=/sbin     -F perm=x -k exec-sbin
+-a always,exit -F arch=b64 -S execve -F dir=/usr/sbin -F perm=x -k exec-usr-sbin
+
+-a always,exit -F arch=b32 -S execve -F dir=/sbin     -F perm=x -k exec-sbin
+-a always,exit -F arch=b32 -S execve -F dir=/usr/sbin -F perm=x -k exec-usr-sbin
+
+
+## === HIGH-RISK TOOLS / RECON / REVERSE SHELL HELPERS =============
+
+# Common netcat binaries
+-a always,exit -F arch=b64 -S execve -F exe=/bin/nc          -k netcat-usage
+-a always,exit -F arch=b64 -S execve -F exe=/usr/bin/nc      -k netcat-usage
+-a always,exit -F arch=b64 -S execve -F exe=/usr/bin/ncat    -k netcat-usage
+-a always,exit -F arch=b64 -S execve -F exe=/usr/bin/netcat  -k netcat-usage
+
+-a always,exit -F arch=b32 -S execve -F exe=/bin/nc          -k netcat-usage
+-a always,exit -F arch=b32 -S execve -F exe=/usr/bin/nc      -k netcat-usage
+-a always,exit -F arch=b32 -S execve -F exe=/usr/bin/ncat    -k netcat-usage
+-a always,exit -F arch=b32 -S execve -F exe=/usr/bin/netcat  -k netcat-usage
+
+# Nmap / scanning tools
+-a always,exit -F arch=b64 -S execve -F exe=/usr/bin/nmap    -k portscan
+-a always,exit -F arch=b64 -S execve -F exe=/usr/bin/masscan -k portscan
+
+-a always,exit -F arch=b32 -S execve -F exe=/usr/bin/nmap    -k portscan
+-a always,exit -F arch=b32 -S execve -F exe=/usr/bin/masscan -k portscan
+
+# Bash used to start network-ish / weird shells: just log all bash execs for users
+-a always,exit -F arch=b64 -S execve -F exe=/bin/bash      -F auid>=1000 -F auid!=4294967295 -k user-bash
+-a always,exit -F arch=b32 -S execve -F exe=/bin/bash      -F auid>=1000 -F auid!=4294967295 -k user-bash
+
+
+## === PRIV ESC / SETUID / ROOT GAIN ===============================
+
+# Log all executions that result in euid=0 by non-root login users
+-a always,exit -F arch=b64 -S execve -F euid=0 -F auid>=1000 -F auid!=4294967295 -k priv-esc
+-a always,exit -F arch=b32 -S execve -F euid=0 -F auid>=1000 -F auid!=4294967295 -k priv-esc
+
+# Log all executions of setuid binaries (kernel marks them)
+-a always,exit -F arch=b64 -S execve -F obj_type=unix_setuid_object -k setuid-exec
+-a always,exit -F arch=b32 -S execve -F obj_type=unix_setuid_object -k setuid-exec
+
+
+## === KERNEL MODULE LOAD / TAMPERING ==============================
+
+# Attempts to load/unload kernel modules
+-a always,exit -F arch=b64 -S init_module -S finit_module -S delete_module -k kernel-module
+-a always,exit -F arch=b32 -S init_module -S finit_module -S delete_module -k kernel-module
+
+# Watch /lib/modules for direct tampering
+-w /lib/modules -p wa -k kernel-modules-dir
+
+
+## === SSH KEYS / AUTHORIZED KEYS ==================================
+
+# Changes to system-wide and user SSH keys (home dir path is generic)
+-w /etc/ssh -p wa -k ssh-keys-change
+-w /root/.ssh/authorized_keys -p wa -k ssh-root-keys
+
+# This pattern watches all users’ authorized_keys under /home
+-w /home -p wa -k ssh-user-keys

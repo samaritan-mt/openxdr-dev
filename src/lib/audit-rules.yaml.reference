@@ -1,0 +1,372 @@
+## audit-rules.yaml.reference
+##
+## This file is a *reference* for how to express kernel audit (auditd)
+## rules in YAML. It is not meant to be loaded directly in production,
+## but to document the shapes of rules a parser/translator should support.
+##
+## Top-level structure:
+##
+##   rules:
+##     - id: "string"                 # logical rule identifier
+##       description: "string"        # human description (optional)
+##       type: "syscall" | "watch"    # how the rule is rendered
+##       ...
+##
+## For `type: syscall` rules:
+##
+##   - `action` (required)
+##       Corresponds to the audit `-a` field, e.g. "always,exit".
+##
+##   - `arches` (required)
+##       List of architectures to generate rules for, e.g. ["b64", "b32"].
+##       Each arch produces a separate `-F arch=...` rule line.
+##
+##   - `syscalls` (required)
+##       List of syscall names, e.g. ["execve"]. Generates one `-S` entry
+##       per syscall in the rendered auditd rule.
+##
+##   - `filters` (optional)
+##       A list of field comparisons that are rendered as `-F` clauses.
+##       Each filter has:
+##
+##         field: "euid" | "auid" | "exe" | "dir" | "perm" | "obj_type" | ...
+##         op:    "eq" | "ne" | "gt" | "lt" | "ge" | "le" | "regex"
+##         value: string
+##
+##       Examples:
+##         field: "euid", op: "ne", value: "0"          ->  -F euid!=0
+##         field: "auid", op: "ge", value: "1000"       ->  -F auid>=1000
+##         field: "auid", op: "ne", value: "4294967295" ->  -F auid!=4294967295
+##         field: "exe",  op: "eq", value: "/usr/bin/sudo" -> -F exe=/usr/bin/sudo
+##
+##   - `key` (required)
+##       The audit key (`-k`), used for grouping/identifying records.
+##
+## For `type: watch` rules:
+##
+##   - `path` (required)
+##       Filesystem path being watched, rendered as `-w <path>`.
+##
+##   - `perms` (required)
+##       Permission string (e.g. "wa") rendered as `-p <perms>`.
+##
+##   - `key` (required)
+##       Audit key for the watch rule, rendered as `-k <key>`.
+##
+## Below are example rules that roughly correspond to the current
+## `src/lib/auditd-rules.raw` content and demonstrate the main use cases.
+
+rules:
+  ##########################################################################
+  # 1. Suspicious sudo usage
+  ##########################################################################
+
+  - id: "suspicious_sudo_any_exec"
+    description: "Log all executions of /usr/bin/sudo"
+    type: "syscall"
+    action: "always,exit"
+    arches: ["b64", "b32"]
+    syscalls: ["execve"]
+    filters:
+      - field: "exe"
+        op: "eq"
+        value: "/usr/bin/sudo"
+    key: "suspicious-sudo"
+
+  - id: "suspicious_sudo_nonroot"
+    description: "Log sudo when effective UID is not root"
+    type: "syscall"
+    action: "always,exit"
+    arches: ["b64", "b32"]
+    syscalls: ["execve"]
+    filters:
+      - field: "exe"
+        op: "eq"
+        value: "/usr/bin/sudo"
+      - field: "euid"
+        op: "ne"
+        value: "0"
+    key: "suspicious-sudo-nonroot"
+
+  ##########################################################################
+  # 2. Failed login / auth files
+  ##########################################################################
+
+  - id: "failed_login_btmp"
+    description: "Watch failed login log (btmp)"
+    type: "watch"
+    path: "/var/log/btmp"
+    perms: "wa"
+    key: "failed-logins"
+
+  - id: "failed_login_faillog"
+    description: "Watch faillog for failed login attempts"
+    type: "watch"
+    path: "/var/log/faillog"
+    perms: "wa"
+    key: "failed-logins"
+
+  - id: "auth_log_messages"
+    description: "Watch auth logs (auth.log)"
+    type: "watch"
+    path: "/var/log/auth.log"
+    perms: "wa"
+    key: "auth-log"
+
+  - id: "auth_secure_messages"
+    description: "Watch auth logs (secure)"
+    type: "watch"
+    path: "/var/log/secure"
+    perms: "wa"
+    key: "auth-log"
+
+  ##########################################################################
+  # 3. Critical system file modifications
+  ##########################################################################
+
+  - id: "identity_change_passwd"
+    description: "Changes to /etc/passwd"
+    type: "watch"
+    path: "/etc/passwd"
+    perms: "wa"
+    key: "identity-change"
+
+  - id: "identity_change_shadow"
+    description: "Changes to /etc/shadow"
+    type: "watch"
+    path: "/etc/shadow"
+    perms: "wa"
+    key: "identity-change"
+
+  - id: "identity_change_group"
+    description: "Changes to /etc/group"
+    type: "watch"
+    path: "/etc/group"
+    perms: "wa"
+    key: "identity-change"
+
+  - id: "identity_change_gshadow"
+    description: "Changes to /etc/gshadow"
+    type: "watch"
+    path: "/etc/gshadow"
+    perms: "wa"
+    key: "identity-change"
+
+  - id: "sudoers_change_main"
+    description: "Changes to /etc/sudoers"
+    type: "watch"
+    path: "/etc/sudoers"
+    perms: "wa"
+    key: "sudoers-change"
+
+  - id: "sudoers_change_dir"
+    description: "Changes to /etc/sudoers.d"
+    type: "watch"
+    path: "/etc/sudoers.d"
+    perms: "wa"
+    key: "sudoers-change"
+
+  - id: "pam_config_change"
+    description: "Changes to /etc/pam.d"
+    type: "watch"
+    path: "/etc/pam.d"
+    perms: "wa"
+    key: "pam-change"
+
+  - id: "ssh_config_change_sshd"
+    description: "Changes to SSH server config"
+    type: "watch"
+    path: "/etc/ssh/sshd_config"
+    perms: "wa"
+    key: "ssh-config-change"
+
+  - id: "ssh_config_change_client"
+    description: "Changes to SSH client config"
+    type: "watch"
+    path: "/etc/ssh/ssh_config"
+    perms: "wa"
+    key: "ssh-config-change"
+
+  ##########################################################################
+  # 4. Execution in privileged directories
+  ##########################################################################
+
+  - id: "exec_in_sbin"
+    description: "Any execution in /sbin (usually admin-only tools)"
+    type: "syscall"
+    action: "always,exit"
+    arches: ["b64", "b32"]
+    syscalls: ["execve"]
+    filters:
+      - field: "dir"
+        op: "eq"
+        value: "/sbin"
+      - field: "perm"
+        op: "eq"
+        value: "x"
+    key: "exec-sbin"
+
+  - id: "exec_in_usr_sbin"
+    description: "Any execution in /usr/sbin"
+    type: "syscall"
+    action: "always,exit"
+    arches: ["b64", "b32"]
+    syscalls: ["execve"]
+    filters:
+      - field: "dir"
+        op: "eq"
+        value: "/usr/sbin"
+      - field: "perm"
+        op: "eq"
+        value: "x"
+    key: "exec-usr-sbin"
+
+  ##########################################################################
+  # 5. High-risk tools / recon / reverse shell helpers
+  ##########################################################################
+
+  - id: "netcat_usage_bin_nc"
+    description: "Common netcat binary /bin/nc"
+    type: "syscall"
+    action: "always,exit"
+    arches: ["b64", "b32"]
+    syscalls: ["execve"]
+    filters:
+      - field: "exe"
+        op: "eq"
+        value: "/bin/nc"
+    key: "netcat-usage"
+
+  - id: "netcat_usage_usr_bin_nc"
+    description: "Common netcat binary /usr/bin/nc"
+    type: "syscall"
+    action: "always,exit"
+    arches: ["b64", "b32"]
+    syscalls: ["execve"]
+    filters:
+      - field: "exe"
+        op: "eq"
+        value: "/usr/bin/nc"
+    key: "netcat-usage"
+
+  - id: "nmap_usage"
+    description: "Nmap scanning tool"
+    type: "syscall"
+    action: "always,exit"
+    arches: ["b64", "b32"]
+    syscalls: ["execve"]
+    filters:
+      - field: "exe"
+        op: "eq"
+        value: "/usr/bin/nmap"
+    key: "portscan"
+
+  - id: "masscan_usage"
+    description: "Masscan scanning tool"
+    type: "syscall"
+    action: "always,exit"
+    arches: ["b64", "b32"]
+    syscalls: ["execve"]
+    filters:
+      - field: "exe"
+        op: "eq"
+        value: "/usr/bin/masscan"
+    key: "portscan"
+
+  - id: "user_bash_exec"
+    description: "Bash executions by non-daemon users"
+    type: "syscall"
+    action: "always,exit"
+    arches: ["b64", "b32"]
+    syscalls: ["execve"]
+    filters:
+      - field: "exe"
+        op: "eq"
+        value: "/bin/bash"
+      - field: "auid"
+        op: "ge"
+        value: "1000"
+      - field: "auid"
+        op: "ne"
+        value: "4294967295"
+    key: "user-bash"
+
+  ##########################################################################
+  # 6. Privilege escalation / setuid / root gain
+  ##########################################################################
+
+  - id: "priv_esc_euid_zero"
+    description: "Execve resulting in euid=0 by non-root login users"
+    type: "syscall"
+    action: "always,exit"
+    arches: ["b64", "b32"]
+    syscalls: ["execve"]
+    filters:
+      - field: "euid"
+        op: "eq"
+        value: "0"
+      - field: "auid"
+        op: "ge"
+        value: "1000"
+      - field: "auid"
+        op: "ne"
+        value: "4294967295"
+    key: "priv-esc"
+
+  - id: "setuid_exec"
+    description: "Executions of setuid binaries (kernel-marked)"
+    type: "syscall"
+    action: "always,exit"
+    arches: ["b64", "b32"]
+    syscalls: ["execve"]
+    filters:
+      - field: "obj_type"
+        op: "eq"
+        value: "unix_setuid_object"
+    key: "setuid-exec"
+
+  ##########################################################################
+  # 7. Kernel module load / tampering
+  ##########################################################################
+
+  - id: "kernel_module_syscalls"
+    description: "Attempts to load/unload kernel modules"
+    type: "syscall"
+    action: "always,exit"
+    arches: ["b64", "b32"]
+    syscalls: ["init_module", "finit_module", "delete_module"]
+    filters: []
+    key: "kernel-module"
+
+  - id: "kernel_module_dir_watch"
+    description: "Watch /lib/modules for direct tampering"
+    type: "watch"
+    path: "/lib/modules"
+    perms: "wa"
+    key: "kernel-modules-dir"
+
+  ##########################################################################
+  # 8. SSH keys / authorized keys
+  ##########################################################################
+
+  - id: "ssh_system_keys_change"
+    description: "Changes to system-wide SSH keys"
+    type: "watch"
+    path: "/etc/ssh"
+    perms: "wa"
+    key: "ssh-keys-change"
+
+  - id: "ssh_root_authorized_keys"
+    description: "Changes to root's authorized_keys"
+    type: "watch"
+    path: "/root/.ssh/authorized_keys"
+    perms: "wa"
+    key: "ssh-root-keys"
+
+  - id: "ssh_user_authorized_keys_home"
+    description: "Changes to users' authorized_keys under /home"
+    type: "watch"
+    path: "/home"
+    perms: "wa"
+    key: "ssh-user-keys"
+
