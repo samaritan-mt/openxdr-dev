@@ -60,3 +60,11 @@ Planned tasks:
 - [ ] Implement rule engine (single-event and aggregation).
 - [ ] Emit JSON alerts to configurable sinks (stdout/file/syslog/HTTP) (currently stdout only).
 - [ ] Support live rule reload without restarting the agent.
+
+
+## TODO 
+
+- [] Design and implement yaml rules parser and transformer to auditd 
+- [] Implement data structures for communication between agent and console
+- [] Work on local UI
+- [] Design the Alerting mechanism for linux auditd 
