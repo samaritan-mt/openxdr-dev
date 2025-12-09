@@ -2,6 +2,8 @@
 name = "openxdr-agent"
 version = "0.1.0"
 edition = "2021"
+indlude = ["src/**"]
+
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -11,4 +13,5 @@ serde_yaml = "0.9"
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+pnet = "0.35.0"
 

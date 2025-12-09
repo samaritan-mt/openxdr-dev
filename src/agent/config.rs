@@ -1,6 +1,7 @@
+use std::fmt::Write;
 use std::path::PathBuf;
 use std::process::Command;
-
+use pnet::datalink;
 use crate::agent::Error;
 /**
  * Configuration for the Agent.
@@ -13,10 +14,49 @@ pub struct Config {
     pub os_distribution: Option<String>,
     pub os_kernel_version: Option<String>,
     pub os_release: Option<String>,
+    pub network_config: Option<NetworkConfig>,
+    pub enableLocalUI : bool //Default: false
+}
+
+#[derive(Debug, Clone)]
+pub struct InterfaceInfo {
+    pub name: String,
+    pub mac_address: Option<String>,
+    pub ips: Vec<String>
+}
+
+#[derive(Debug, Clone)]
+pub struct NetworkConfig {
+    pub interfaces: Vec<InterfaceInfo>,
+    pub dns_servers: Vec<String>,
+    pub gateway: Option<String>,
 }
 
 
 impl Config {
+
+
+    pub fn new(   rules_path: PathBuf,
+     os_type: Option<String>,
+    arch_type: Option<String>,
+    agent_version: Option<String>,
+    os_distribution: Option<String>,
+    os_kernel_version: Option<String>,
+    os_release: Option<String>,
+    network_config: Option<NetworkConfig>,
+    enable_local_ui : bool ) -> Self {
+        Self {
+            rules_path,
+            os_type,
+            arch_type,
+            agent_version,
+            os_distribution,
+            os_kernel_version,
+            os_release,
+            network_config,
+            enableLocalUI: enable_local_ui
+        }
+    }
 
     pub fn load_default() -> Result<Self, Error> {
         let rules_path = PathBuf::from("src/lib/alert-rules.yaml");
@@ -30,7 +70,12 @@ impl Config {
         let os_distribution = detect_os_distribution();
         let os_kernel_version = detect_os_kernel_version();
         let os_release = detect_os_release();
-
+        let network_config = Some(NetworkConfig::new(
+            NetworkConfig::fetch_interfaces_from_runtime(),
+            NetworkConfig::fetch_dns_servers_from_runtime(),
+            None, // Gateway detection can be added later
+        ));
+        let enableLocalUI = false;
         Ok(Self {
             rules_path,
             os_type,
@@ -39,7 +84,13 @@ impl Config {
             os_distribution,
             os_kernel_version,
             os_release,
+            network_config,
+            enableLocalUI
         })
+
+
+
+
     }
 
 
@@ -81,7 +132,107 @@ impl Config {
     }
 }
 
+pub fn global_to_string(config: &Config) -> String {
+    const LABEL_WIDTH: usize = 20;
+    let divider = "==============================";
+    let mut output = String::new();
 
+    let _ = writeln!(output, "{divider}");
+    let _ = writeln!(output, "Agent Configuration");
+    let _ = writeln!(output, "{divider}");
+    write_field(&mut output, LABEL_WIDTH, "OS Type", config.os_type_string());
+    write_field(
+        &mut output,
+        LABEL_WIDTH,
+        "Architecture Type",
+        config.arch_type_string(),
+    );
+    write_field(
+        &mut output,
+        LABEL_WIDTH,
+        "Agent Version",
+        config.agent_version_string(),
+    );
+    write_field(
+        &mut output,
+        LABEL_WIDTH,
+        "OS Distribution",
+        config.os_distribution_string(),
+    );
+    write_field(
+        &mut output,
+        LABEL_WIDTH,
+        "OS Kernel Version",
+        config.os_kernel_version_string(),
+    );
+    write_field(
+        &mut output,
+        LABEL_WIDTH,
+        "OS Release",
+        config.os_release_string(),
+    );
+    write_field(
+        &mut output,
+        LABEL_WIDTH,
+        "Enable Local UI",
+        if config.enableLocalUI { "Yes" } else { "No" },
+    );
+
+    output.push('\n');
+    match &config.network_config {
+        Some(network) => output.push_str(&format_network_config(network, LABEL_WIDTH)),
+        None => write_field(&mut output, LABEL_WIDTH, "Network", "None"),
+    }
+
+    output
+}
+
+fn write_field(output: &mut String, label_width: usize, label: &str, value: impl AsRef<str>) {
+    let _ = writeln!(
+        output,
+        "{label:<width$}: {}",
+        value.as_ref(),
+        width = label_width
+    );
+}
+
+fn format_network_config(network: &NetworkConfig, label_width: usize) -> String {
+    let mut output = String::new();
+    write_field(&mut output, label_width, "Network", " ");
+
+    if network.interfaces.is_empty() {
+        let _ = writeln!(output, "  Interfaces: none detected");
+    } else {
+        let _ = writeln!(output, "  Interfaces:");
+        for iface in &network.interfaces {
+            let mac = iface
+                .mac_address
+                .clone()
+                .unwrap_or_else(|| "no-mac-address".to_string());
+            let ips = if iface.ips.is_empty() {
+                "no IPs".to_string()
+            } else {
+                iface.ips.join(", ")
+            };
+            let _ = writeln!(output, "    - {} (MAC: {})", iface.name, mac);
+            let _ = writeln!(output, "      IPs: {}", ips);
+        }
+    }
+
+    let dns = if network.dns_servers.is_empty() {
+        "none".to_string()
+    } else {
+        network.dns_servers.join(", ")
+    };
+    let gateway = network
+        .gateway
+        .clone()
+        .unwrap_or_else(|| "None".to_string());
+    let _ = writeln!(output, "  DNS Servers: {}", dns);
+    let _ = writeln!(output, "  Gateway: {}", gateway);
+
+    output
+}
 fn detect_os_distribution() -> Option<String> {
     // Linux: prefer /etc/os-release PRETTY_NAME or NAME
     #[cfg(target_os = "linux")]
@@ -176,3 +327,88 @@ fn detect_os_release() -> Option<String> {
     None
 }
 
+
+impl InterfaceInfo {
+    pub fn new(name: String, mac_address: Option<String>, ips: Vec<String>) -> Self {
+        Self {
+            name,
+            mac_address,
+            ips,
+        }
+    }
+}
+    
+
+impl NetworkConfig {
+    pub fn new(interfaces: Vec<InterfaceInfo>, dns_servers: Vec<String>, gateway: Option<String>) -> Self {
+        Self {
+            interfaces,
+            dns_servers,
+            gateway,
+        }
+    }
+
+    pub fn fetch_interfaces_from_runtime() -> Vec<InterfaceInfo> {
+        let mut interface_infos = Vec::new();
+        let interfaces = datalink::interfaces();
+
+        for interface in interfaces {
+            let name = interface.name.clone();
+            let mac_address = interface.mac.map(|mac| mac.to_string());
+            let ips: Vec<String> = interface.ips.iter().map(|ip| ip.ip().to_string()).collect();
+
+            let interface_info = InterfaceInfo::new(name, mac_address, ips);
+            interface_infos.push(interface_info);
+        }
+
+        interface_infos
+    }
+
+    pub fn fetch_dns_servers_from_runtime() -> Vec<String> {
+        let mut dns_servers = Vec::new();
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(contents) = std::fs::read_to_string("/etc/resolv.conf") {
+                for line in contents.lines() {
+                    if line.starts_with("nameserver") {
+                        if let Some(server) = line.split_whitespace().nth(1) {
+                            dns_servers.push(server.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(contents) = std::fs::read_to_string("/etc/resolv.conf") {
+                for line in contents.lines() {
+                    if line.starts_with("nameserver") {
+                        if let Some(server) = line.split_whitespace().nth(1) {
+                            dns_servers.push(server.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(output) = Command::new("nslookup").arg("-type=ns").arg("localhost").output() {
+                if output.status.success() {
+                    let s = String::from_utf8_lossy(&output.stdout);
+                    for line in s.lines() {
+                        if line.contains("Address:") {
+                            if let Some(addr) = line.split_whitespace().nth(1) {
+                                dns_servers.push(addr.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        dns_servers
+    }
+}

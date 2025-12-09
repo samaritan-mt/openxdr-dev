@@ -1,150 +1,126 @@
-# rules.yaml
-rules:
-  - id: "suspicious_sudo"
-    description: "Detect sudo by non-admin users"
-    severity: high
-    match:
-      event_type: "EXECVE"
-      process_name: "sudo"
-      user_not_in: ["root", "admin"]
-    actions:
-      - type: "alert_json"
-        destination: "stdout"
+- id: "suspicious_sudo"
+  description: "Detect sudo by non-admin users"
+  severity: high
+  os: linux
+  match:
+    event_type: "EXECVE"
+    process_name: "sudo"
+    user_not_in: ["root"]
+  actions:
+    - type: "alert_json"
+      destination: "stdout"
+- id: "unauthorized_file_modification"
+  description: "Detect edits to protected system files by non-root users"
+  severity: high
+  os: linux
+  match:
+    event_type: "SYSCALL"
+    syscall: ["open", "openat", "write"]
+    file_path_in:
+      - "/etc/passwd"
+      - "/etc/shadow"
+      - "/etc/sudoers"
+    user_not_in: ["root"]
+  actions:
+    - type: "alert_json"
+      destination: "stdout"
 
-  - id: "multiple_failed_logins"
-    description: "5 failed logins from same user within 1 minute"
-    severity: medium
-    aggregation:
-      window_seconds: 60
-      group_by: ["user"]
-      conditions:
-        event_type: "LOGIN"
-        result: "failed"
-      threshold:
-        count_gte: 5
-    actions:
-      - type: "alert_json"
-        destination: "stdout"
+- id: "unexpected_binary_exec"
+  description: "Non-root user executing binaries in /usr/sbin or /sbin"
+  severity: medium
+  os: linux
+  match:
+    event_type: "EXECVE"
+    process_path_prefix_in:
+      - "/usr/sbin/"
+      - "/sbin/"
+    user_not_in: ["root"]
+  actions:
+    - type: "alert_json"
+      destination: "stdout"
 
-  - id: "unauthorized_file_modification"
-    description: "Detect edits to protected system files by non-root users"
-    severity: high
-    match:
-      event_type: "SYSCALL"
-      syscall: ["open", "openat", "write"]
-      file_path_in:
-        - "/etc/passwd"
-        - "/etc/shadow"
-        - "/etc/sudoers"
-      user_not_in: ["root"]
-    actions:
-      - type: "alert_json"
-        destination: "stdout"
 
-  - id: "unexpected_binary_exec"
-    description: "Non-root user executing binaries in /usr/sbin or /sbin"
-    severity: medium
-    match:
-      event_type: "EXECVE"
-      process_path_prefix_in:
-        - "/usr/sbin/"
-        - "/sbin/"
-      user_not_in: ["root"]
-    actions:
-      - type: "alert_json"
-        destination: "stdout"
+- id: "netcat_or_reverse_shell"
+  description: "Detect common reverse-shell tools"
+  severity: high
+  os: linux
+  match:
+    event_type: "EXECVE"
+    process_name_in: ["nc", "ncat", "netcat", "bash"]
+    args_regex: ".*(\\-e|\\-c|/dev/tcp/).*"
+  actions:
+    - type: "alert_json"
+      destination: "stdout"
 
-  - id: "high_rate_process_spawning"
-    description: "User spawning 20+ processes in 10 seconds"
-    severity: medium
-    aggregation:
-      window_seconds: 10
-      group_by: ["user"]
-      conditions:
-        event_type: "EXECVE"
-      threshold:
-        count_gte: 20
-    actions:
-      - type: "alert_json"
-        destination: "stdout"
+- id: "kernel_module_injection"
+  description: "Monitor for attempts to load kernel modules"
+  severity: critical
+  os: linux
+  match:
+    event_type: "SYSCALL"
+    syscall: ["init_module", "finit_module"]
+  actions:
+    - type: "alert_json"
+      destination: "stdout"
 
-  - id: "netcat_or_reverse_shell"
-    description: "Detect common reverse-shell tools"
-    severity: high
-    match:
-      event_type: "EXECVE"
-      process_name_in: ["nc", "ncat", "netcat", "bash"]
-      args_regex: ".*(\\-e|\\-c|/dev/tcp/).*"
-    actions:
-      - type: "alert_json"
-        destination: "stdout"
+- id: "unexpected_network_tool_usage"
+  description: "Detect use of network scanning tools"
+  severity: high
+  os: linux
+  match:
+    event_type: "EXECVE"
+    process_name_in: ["nmap", "masscan", "zmap"]
+  actions:
+    - type: "alert_json"
+      destination: "stdout"
 
-  - id: "kernel_module_injection"
-    description: "Monitor for attempts to load kernel modules"
-    severity: critical
-    match:
-      event_type: "SYSCALL"
-      syscall: ["init_module", "finit_module"]
-    actions:
-      - type: "alert_json"
-        destination: "stdout"
+- id: "privilege_escalation_attempt"
+  description: "Detect calls to setuid binaries by non-root users"
+  severity: high
+  os: linux
+  match:
+    event_type: "EXECVE"
+    file_has_setuid_bit: true
+    user_not_in: ["root"]
+  actions:
+    - type: "alert_json"
+      destination: "stdout"
 
-  - id: "unexpected_network_tool_usage"
-    description: "Detect use of network scanning tools"
-    severity: high
-    match:
-      event_type: "EXECVE"
-      process_name_in: ["nmap", "masscan", "zmap"]
-    actions:
-      - type: "alert_json"
-        destination: "stdout"
+- id: "config_file_tampering"
+  description: "Changes to SSH config"
+  severity: medium
+  os: linux
+  match:
+    event_type: "SYSCALL"
+    syscall_in: ["open", "write", "openat"]
+    file_path_in:
+      - "/etc/ssh/sshd_config"
+      - "/etc/ssh/ssh_config"
+  actions:
+    - type: "alert_json"
+      destination: "stdout"
 
-  - id: "privilege_escalation_attempt"
-    description: "Detect calls to setuid binaries by non-root users"
-    severity: high
-    match:
-      event_type: "EXECVE"
-      file_has_setuid_bit: true
-      user_not_in: ["root"]
-    actions:
-      - type: "alert_json"
-        destination: "stdout"
+- id: "unauthorized_cron_modification"
+  description: "Detect modifications to cron jobs by non-root users"
+  severity: medium
+  os: linux
+  match:  
+    event_type: "SYSCALL"
+    syscall_in: ["open", "write", "openat"]
+    file_path_regex: "^/var/spool/cron/|^/etc/cron\\..*|^/etc/crontab$"
+    user_not_in: ["root"]
+  actions:
+    - type: "alert_json"
+      destination: "stdout"   
 
-  - id: "config_file_tampering"
-    description: "Changes to SSH config"
-    severity: medium
-    match:
-      event_type: "SYSCALL"
-      syscall_in: ["open", "write", "openat"]
-      file_path_in:
-        - "/etc/ssh/sshd_config"
-        - "/etc/ssh/ssh_config"
-    actions:
-      - type: "alert_json"
-        destination: "stdout"
-  - id: "sensitive_data_exfiltration"
-    description: "Detect large outbound data transfers"
-    severity: high
-    aggregation:
-      window_seconds: 300
-      group_by: ["user", "destination_ip"]
-      conditions:
-        event_type: "NETWORK"
-        direction: "outbound"
-      threshold:
-        data_transferred_gte: 104857600  # 100 MB
-    actions:
-      - type: "alert_json"
-        destination: "stdout" 
-
-  - id: "unauthorized_cron_modification"
-    description: "Detect modifications to cron jobs by non-root users"
-    severity: medium
-    match:  
-      event_type: "SYSCALL"
-      syscall_in: ["open", "write", "openat"]
-      file_path_regex: "^/var/spool/cron/|^/etc/cron\\..*|^/etc/crontab$"
-      user_not_in: ["root"]
-    actions:
-      - type: "alert_json"
-        destination: "stdout"   
+- id: "suspicious_launchctl_usage"
+  description: "Detect use of launchctl by non-admin users"
+  severity: medium
+  os: macos
+  match:
+    event_type: "EXECVE"
+    process_name: "launchctl"
+    user_not_in: ["root", "admin"]
+  actions:
+    - type: "alert_json"
+      destination: "stdout"

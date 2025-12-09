@@ -6,5 +6,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("yaml error: {0}")]
     Yaml(#[from] serde_yaml::Error),
+    #[error("unsupported platform")]
+    UnsupportedPlatform,
+    #[error("other error: {0}")]
+    Other(String),
 }
-
