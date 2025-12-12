@@ -7,7 +7,9 @@ use std::io::BufRead;
 use serde::de::value::Error;
 
 use crate::agent::config::global_to_string;
-
+/**
+ * Main function to run the agent and display its configuration.
+ */
 fn main() -> Result<(), Error> {
     let agent_config = agent::config::Config::load_default().expect("Failed to load agent config");
     println!("Agent Configuration:");

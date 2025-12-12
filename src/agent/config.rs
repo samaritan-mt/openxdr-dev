@@ -5,6 +5,15 @@ use pnet::datalink;
 use crate::agent::Error;
 /**
  * Configuration for the Agent.
+ * rules_path - Path to the rules file
+ * os_type - Operating system type (e.g., "linux", "windows")
+ * arch_type - Architecture type (e.g., "x86_64", "arm64
+ * agent_version - Version of the agent
+ * os_distribution - OS distribution (e.g., "Ubuntu", "Windows 10")
+ * os_kernel_version - Kernel version of the OS
+ * os_release - OS release information
+ * network_config - Network configuration details
+ * enableLocalUI - Flag to enable local UI (default: false)
  */
 pub struct Config {
     pub rules_path: PathBuf,
@@ -18,13 +27,24 @@ pub struct Config {
     pub enableLocalUI : bool //Default: false
 }
 
+/**
+ * Information about a network interface.
+ * name - Name of the interface
+ * mac_address - MAC address of the interface
+ * ips - List of IP addresses assigned to the interface
+ */
 #[derive(Debug, Clone)]
 pub struct InterfaceInfo {
     pub name: String,
     pub mac_address: Option<String>,
     pub ips: Vec<String>
 }
-
+/**
+ * Network configuration details.
+ * interfaces - List of network interfaces
+ * dns_servers - List of DNS servers
+ * gateway - Default gateway
+ */
 #[derive(Debug, Clone)]
 pub struct NetworkConfig {
     pub interfaces: Vec<InterfaceInfo>,
@@ -32,7 +52,9 @@ pub struct NetworkConfig {
     pub gateway: Option<String>,
 }
 
-
+/**
+ * Implementation of the Config.
+ */
 impl Config {
 
 
@@ -57,7 +79,10 @@ impl Config {
             enableLocalUI: enable_local_ui
         }
     }
-
+/**
+ * Load the default configuration for the agent.
+ * Returns: Config instance or Error if loading fails
+ */
     pub fn load_default() -> Result<Self, Error> {
         let rules_path = PathBuf::from("src/lib/alert-rules.yaml");
 
@@ -131,7 +156,11 @@ impl Config {
             .unwrap_or_else(|| "unknown-release".to_string())
     }
 }
-
+/**
+ * Convert the global configuration to a formatted string.
+ * config - Reference to the Config instance
+ * Returns: Formatted string representation of the configuration
+ */
 pub fn global_to_string(config: &Config) -> String {
     const LABEL_WIDTH: usize = 20;
     let divider = "==============================";
@@ -186,7 +215,14 @@ pub fn global_to_string(config: &Config) -> String {
 
     output
 }
-
+/**
+ * Helper function to write a labeled field to the output string.
+ * output - Mutable reference to the output string
+ * label_width - Width for label alignment
+ * label - Label for the field
+ * value - Value of the field
+ * Returns: ()
+ */
 fn write_field(output: &mut String, label_width: usize, label: &str, value: impl AsRef<str>) {
     let _ = writeln!(
         output,
@@ -195,7 +231,12 @@ fn write_field(output: &mut String, label_width: usize, label: &str, value: impl
         width = label_width
     );
 }
-
+/**
+ * Format the network configuration into a string.
+ * network - Reference to the NetworkConfig instance
+ * label_width - Width for label alignment
+ * Returns: Formatted string representation of the network configuration
+ */
 fn format_network_config(network: &NetworkConfig, label_width: usize) -> String {
     let mut output = String::new();
     write_field(&mut output, label_width, "Network", " ");
@@ -233,6 +274,11 @@ fn format_network_config(network: &NetworkConfig, label_width: usize) -> String 
 
     output
 }
+
+/**
+ * Detect the operating system distribution.
+ * Returns: Option containing the OS distribution string if detected
+ */
 fn detect_os_distribution() -> Option<String> {
     // Linux: prefer /etc/os-release PRETTY_NAME or NAME
     #[cfg(target_os = "linux")]
@@ -266,7 +312,10 @@ fn detect_os_distribution() -> Option<String> {
 
     None
 }
-
+/**
+ * Detect the operating system kernel version.
+ * Returns: Option containing the OS kernel version string if detected
+ */
 fn detect_os_kernel_version() -> Option<String> {
     // On Unix-like systems, try `uname -r`
     #[cfg(unix)]
@@ -285,7 +334,10 @@ fn detect_os_kernel_version() -> Option<String> {
 
 }
 
-
+/**
+ * Detect the operating system release information.
+ * Returns: Option containing the OS release string if detected
+ */
 fn detect_os_release() -> Option<String> {
     // On Unix-like systems, try `uname -v`
     #[cfg(target_os = "linux")]
@@ -327,7 +379,9 @@ fn detect_os_release() -> Option<String> {
     None
 }
 
-
+/**
+ * Implementation of the InterfaceInfo.
+ */
 impl InterfaceInfo {
     pub fn new(name: String, mac_address: Option<String>, ips: Vec<String>) -> Self {
         Self {
@@ -337,8 +391,9 @@ impl InterfaceInfo {
         }
     }
 }
-    
-
+/**
+ * Implementation of the NetworkConfig.
+ */
 impl NetworkConfig {
     pub fn new(interfaces: Vec<InterfaceInfo>, dns_servers: Vec<String>, gateway: Option<String>) -> Self {
         Self {
@@ -347,7 +402,10 @@ impl NetworkConfig {
             gateway,
         }
     }
-
+    /**
+     * Fetch network interfaces from the runtime environment.
+     * Returns: Vector of InterfaceInfo instances
+     */
     pub fn fetch_interfaces_from_runtime() -> Vec<InterfaceInfo> {
         let mut interface_infos = Vec::new();
         let interfaces = datalink::interfaces();
@@ -363,7 +421,10 @@ impl NetworkConfig {
 
         interface_infos
     }
-
+    /**
+     * Fetch DNS servers from the runtime environment.
+     * Returns: Vector of DNS server addresses as strings
+     */
     pub fn fetch_dns_servers_from_runtime() -> Vec<String> {
         let mut dns_servers = Vec::new();
 

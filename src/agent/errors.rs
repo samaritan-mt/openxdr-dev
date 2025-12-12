@@ -1,5 +1,13 @@
 use thiserror::Error;
 
+/**
+ * Error enumeration for the agent module.
+ * Io - Represents IO errors
+ * Yaml - Represents YAML parsing errors
+ * UnsupportedPlatform - Indicates that the current platform is not supported
+ * Other - Represents other types of errors with a message
+ */
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("io error: {0}")]

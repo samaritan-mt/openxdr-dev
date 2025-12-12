@@ -9,7 +9,15 @@ use std::process::Command;
 use serde::Serialize;
 use serde::Deserialize;
 
-
+/**
+ * Event structure representing an audit event.
+ * event_type - Type of the event (e.g., "EXECVE")
+ * process_name - Name of the process (e.g., "sudo")
+ * uid - User ID
+ * user_name - User name (e.g., "root", "alice")
+ * pid - Process ID
+ * cmdline - Command line arguments
+ */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub event_type: String,    // e.g. "EXECVE"
@@ -20,11 +28,18 @@ pub struct Event {
     pub cmdline: String,       // optional, can be empty
 }
 
+/**
+ * Engine structure that holds the rules and processes events.
+ * rules - Vector of rules to apply
+ */
+
 #[derive(Debug)]
 pub struct Engine {
     rules: Vec<Rule>,
 }
-
+/**
+ * Implementation of the Engine.
+ */
 impl Engine {
     pub fn new(rules: Vec<Rule>) -> Self {
         Engine { rules }
@@ -56,7 +71,12 @@ impl Engine {
         }
     }
 }
-
+/**
+ * Check if a rule matches an event
+ * rule - The rule to check
+ * ev - The event to check against
+ * Returns: true if the rule matches the event, false otherwise
+ */
 fn rule_matches(rule: &Rule, ev: &Event) -> bool {
     let m = &rule.matcher;
 
@@ -81,7 +101,13 @@ fn rule_matches(rule: &Rule, ev: &Event) -> bool {
 
     true
 }
-
+/**
+ * Alert structure for JSON output
+ * id - Rule ID
+ * description - Rule description
+ * severity - Rule severity
+ * event - The event that triggered the alert
+ */
 #[derive(Debug, Serialize)]
 struct Alert<'a> {
     id: &'a str,
@@ -90,6 +116,12 @@ struct Alert<'a> {
     event: &'a Event,
 }
 
+/**
+ * Emit alert in JSON format to the specified destination
+ * rule - The rule that triggered the alert
+ * ev - The event that triggered the alert
+ * destination - Where to send the alert (e.g., "stdout", "stderr", "file:/path", "tcp:host:port")
+ */
 fn emit_alert_json(rule: &Rule, ev: &Event, destination: &str) {
     let alert = Alert {
         id: &rule.id,
@@ -110,7 +142,10 @@ fn emit_alert_json(rule: &Rule, ev: &Event, destination: &str) {
         }
     }
 }
-
+/**
+ * Open AuditD socket to listen for events
+ * Returns an Error if the operation fails or if the platform is unsupported.
+ */
 pub fn open_auditd_socket() -> Result<(), Error> {
     #[cfg(target_os = "linux")] {
         let status = Command::new("auditctl")
@@ -128,7 +163,10 @@ pub fn open_auditd_socket() -> Result<(), Error> {
     }
 }
 
-
+/**
+ * Listen for AuditD events
+ * Returns an Error if the operation fails or if the platform is unsupported.
+ */
 pub fn listen_auditd_events() -> Result<(), Error> {
     #[cfg(target_os = "linux")] {
         // Placeholder for listening to auditd events
@@ -140,7 +178,12 @@ pub fn listen_auditd_events() -> Result<(), Error> {
     }
 }
 
-
+/**
+ * Match AuditD events to rules
+ * Returns a vector of matched rule IDs or an Error if the operation fails or if the platform is unsupported.
+ * event - The audit event as a string
+ * Returns: Vec of matched rule IDs
+ */
 pub fn match_event_to_rules(event: &str) -> Result<Vec<String>, Error> {
     #[cfg(target_os = "linux")] {
         // Placeholder for matching events to rules
@@ -151,13 +194,33 @@ pub fn match_event_to_rules(event: &str) -> Result<Vec<String>, Error> {
         Err(Error::UnsupportedPlatform)
     }
 }
-
+/**
+ * Raise alerts based on matched rules
+ * matched_rules - Vector of matched rule IDs
+ */
 pub fn raise_alert(matched_rules: Vec<String>) -> Result<(), Error> {
     #[cfg(target_os = "linux")] {
         // Placeholder for raising alerts
         for rule in matched_rules {
             println!("Raising alert for rule: {}", rule);
         }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))] {
+        Err(Error::UnsupportedPlatform)
+    }
+}
+
+/**
+ * Set up eBPF file monitoring hooks
+ * Returns an Error if the operation fails or if the platform is unsupported.
+ */
+pub fn setup_ebpf_file_monitoring() -> Result<(), Error> {
+    #[cfg(target_os = "linux")] {
+        // Placeholder for setting up eBPF hooks
+        println!("Setting up eBPF file monitoring hooks...");
+        // listen for file events and raise alerts
+
         Ok(())
     }
     #[cfg(not(target_os = "linux"))] {
