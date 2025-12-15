@@ -1,0 +1,13 @@
+[package]
+name = "openxdr-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aya-ebpf = { workspace = true }
+aya-log-ebpf = { workspace = true }
+openxdr-common = { path = "../openxdr-common" }
+
+[[bin]]
+name = "openxdr-ebpf"
+path = "src/main.rs"

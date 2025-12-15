@@ -1,0 +1,11 @@
+[package]
+name = "agent-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aya = { workspace = true }
+openxdr-common = { path = "../openxdr-common" }
+anyhow = "1.0"
+bytes = "1"
+tokio = { workspace = true }
