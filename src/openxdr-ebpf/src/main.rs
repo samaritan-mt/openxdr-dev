@@ -57,6 +57,20 @@ pub fn execveat_enter(ctx: TracePointContext) -> u32 {
 }
 
 /**
+ * Program entry point for `execve` syscall monitoring.
+ *
+ * This function attaches to the `sys_exit_execve` tracepoint.
+ * It delegates the processing to `try_execve_exit` with the appropriate offset
+ * for the filename argument.
+ *
+ * # Parameters
+ * * `ctx`: The tracepoint context provided by the kernel.
+ *
+ * # Returns
+ * * `u32`: 0 on success (always returns 0).
+ */
+
+/**
  * Core logic for executing execution event monitoring.
  *
  * This function retrieves the process ID, user ID, command name, and filename
@@ -149,6 +163,9 @@ fn try_execve_enter(ctx: TracePointContext, filename_offset: usize) -> Result<u3
     Ok(0)
 }
 
+/**
+ * Try Execve Exit
+ */
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {

@@ -4,14 +4,12 @@ pub mod config;
 pub mod engine;
 mod errors;
 pub(crate) mod rule;
-
+pub mod user;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 pub use config::Config;
 pub use errors::Error;
-
-
 
 /**
  * An agent that processes audit events and generates alerts based on rules.
@@ -20,18 +18,19 @@ pub use errors::Error;
 pub struct Agent {
     config: Config,
     rules: Option<RuleSet>,
-    
 }
-
 
 /**
  * Implementation of the Agent.
- * 
+ *
  */
 
 impl Agent {
     pub async fn new(config: Config) -> Result<Self, Error> {
-        Ok(Self { config , rules: None })
+        Ok(Self {
+            config,
+            rules: None,
+        })
     }
     /**
      * Runs the agent to process audit events from stdin and output alerts to stdout.
@@ -43,8 +42,6 @@ impl Agent {
         let stdin = BufReader::new(tokio::io::stdin());
         let mut lines = stdin.lines();
         let mut stdout = tokio::io::stdout();
-
-        
 
         while let Some(line) = lines.next_line().await? {
             let line = line.trim();
@@ -100,5 +97,4 @@ impl Agent {
     pub fn get_rules(&self) -> Option<&RuleSet> {
         self.rules.as_ref()
     }
-
 }

@@ -1,6 +1,9 @@
 use aya::{
-    include_bytes_aligned, maps::perf::AsyncPerfEventArray,
-    programs::trace_point::TracePointLinkId, programs::TracePoint, util::online_cpus, Bpf,
+    include_bytes_aligned,
+    maps::perf::AsyncPerfEventArray,
+    programs::{trace_point::TracePointLinkId, TracePoint},
+    util::online_cpus,
+    Bpf, Ebpf,
 };
 use bytes::BytesMut;
 use openxdr_common::ExecveEvent;
@@ -17,7 +20,7 @@ use tokio::io::AsyncReadExt;
  * @member links: HashMap of trace point links
  */
 pub struct EbpfKernel {
-    bpf: Bpf,
+    bpf: Ebpf,
     links: HashMap<String, aya::programs::trace_point::TracePointLinkId>,
 }
 
@@ -36,7 +39,7 @@ impl EbpfKernel {
      * @return: EbpfKernel instance
      */
     pub fn new(data: &[u8]) -> anyhow::Result<Self> {
-        let bpf = Bpf::load(data)?;
+        let bpf = Ebpf::load(data)?;
         Ok(Self {
             bpf,
             links: HashMap::new(),

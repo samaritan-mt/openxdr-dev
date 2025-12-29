@@ -1,70 +1,52 @@
-## Agent (Rust) – Scope
+## OpenXDR Agent (Rust + eBPF)
 
-The first phase of OpenXDR focuses on a Rust-based Linux agent that:
+OpenXDR is a high-performance Linux security agent that leverages **eBPF (Extended Berkeley Packet Filter)** for deep kernel-level visibility. It is designed to capture security-relevant events with minimal overhead and high tamper resistance.
 
-- Reads security-relevant events from `auditd`
-- Normalizes and evaluates them against **dynamic rules**
-- Produces local findings (logs/syslog) for further processing
-- Runs with least privilege and strong hardening
+### Key Features
+- **eBPF-based Event Capture**: Uses kernel tracepoints (`sys_enter_execve`, `sys_enter_execveat`) to capture process executions directly from the kernel.
+- **Safe & Fast**: Written in Rust using the [Aya](https://aya-rs.dev/) framework for strict type safety and memory safety.
+- **Robustness**: Handles high-throughput event streams and gracefully handles kernel memory reads.
+- **Hardening**: Runs as a separate process from the kernel logic, maintaining stability.
 
-## Roadmap – Rust Agent
+## Architecture
 
-- [ ] **Phase 0 – Design & Threat Model**
-  - [ ] Define goals, assumptions, and threat model for the agent
-  - [ ] Decide deployment model (systemd service) and supported distros
+The project consists of two main components:
+1.  **Kernel Probes (`openxdr-ebpf`)**: eBPF programs written in Rust that attach to kernel tracepoints and forward events to user space via `perf_event_array`.
+2.  **User-Space Agent**: A Rust application that loads the eBPF programs, consumes events, applies normalization, and (planned) evaluates detection rules.
 
-- [ ] **Phase 1 – Project Skeleton**
-  - [x] Create `openxdr-agent` Rust binary crate
-  - [x] Add dependencies for config, logging, and async runtime
-  - [x] Implement config loading and structured logging (via `agent::Config` and `tracing_subscriber`)
+## Roadmap
 
-- [ ] **Phase 2 – auditd Integration**
-  - [ ] Implement event source for auditd (netlink or log tailing)
-  - [ ] Normalize audit events into a typed `AuditEvent` struct
-  - [ ] Handle malformed events and log safely
+- [ ] **Phase 0 – Design & Foundation**
+  - [x] Define goals: eBPF-based monitoring for performance and evasion resistance.
+  - [x] Set up project structure with workspace support (`openxdr-common`, `agent-ebpf`, `agent`).
 
-- [ ] **Phase 3 – Dynamic Rule Engine**
-  - [x] Design rule format (YAML in `src/lib/alert-rules.yaml`)
-  - [ ] Implement rule evaluation against incoming events
-  - [ ] Support live rule reload (SIGHUP or file watcher) with validation
+- [ ] **Phase 1 – Kernel Visibility (eBPF)**
+  - [x] Implement standard `execve` monitoring (PID, UID, Command, Filename).
+  - [x] Implement `execveat` support for modern execution flows.
+  - [x] Robust filename reading (handling user vs. kernel space pointers).
 
-- [ ] **Phase 4 – Outputs & Observability**
-  - [ ] Implement sinks for matches (log file and/or syslog)
-  - [ ] Add a basic status interface (CLI subcommand or optional localhost HTTP)
+- [ ] **Phase 2 – User-Space Agent**
+  - [x] Load and attach eBPF programs using Aya.
+  - [x] Efficient async event reading loop (Tokio).
+  - [x] Basic event parsing and logging to stdout.
 
-- [ ] **Phase 5 – Security Hardening**
-  - [ ] Run agent under least privilege with hardened systemd unit
-  - [ ] Add tests for parsers, rule evaluation, and reload behavior
-  - [ ] Document secure configuration and update procedures
+- [ ] **Phase 3 – Dynamic Rules & Alerting**
+  - [x] Design initial rule format (`rules.yaml`).
+  - [x] Implement basic config and rule loading.
+  - [ ] **Next**: Connect eBPF event stream to the rule engine for real-time detection.
+  - [ ] Implement aggregation rules (time-window based).
 
+- [ ] **Phase 4 – Outputs & Integration**
+  - [ ] Structured JSON logging / Syslog integration.
+  - [ ] TLS transport to backend/console.
 
-## Dynamic Rules & Alerts (Agent)
+## Legacy Note
+*Earlier concepts involving `auditd` have been superseded by the direct eBPF approach to ensure better performance and granular control.*
+*The choice of ebpf was made regarding the difficulties to listen to auditd events from the source*
 
-The Rust agent applies a dynamic set of detection rules defined in a YAML file and emits JSON alerts whenever a rule matches.
+## TODO
 
-- Rules are defined in `rules.yaml` as a classical list of rule objects under `rules:`.
-- Each rule can be:
-  - A single-event rule (`match` block).
-  - An aggregation rule (`aggregation` block) that triggers when a threshold is met over a time window.
-- On every match, the agent emits a JSON payload with:
-  - Rule metadata (id, description, severity).
-  - Host and timestamp.
-  - Whether the match is aggregated or single-event.
-  - Normalized event data (e.g., user, process, syscall, paths).
-
-Planned tasks:
-
-- [ ] Design and implement `AuditEvent` (rule YAML schema implemented in `src/lib/alert-rules.yaml`).
-- [x] Implement YAML rule loading and validation (basic loading via `agent::rules::load_rules`).
-- [ ] Implement real-time audit event ingestion and normalization.
-- [ ] Implement rule engine (single-event and aggregation).
-- [ ] Emit JSON alerts to configurable sinks (stdout/file/syslog/HTTP) (currently stdout only).
-- [ ] Support live rule reload without restarting the agent.
-
-
-## TODO 
-
-- [] Design and implement yaml rules parser and transformer to auditd 
-- [] Implement data structures for communication between agent and console
-- [] Work on local UI
-- [] Design the Alerting mechanism for linux auditd 
+- [ ]  Implement File Integrity Monitoring (FIM)
+  - [ ] Using eBPF listen for any file modification for critical files such as /etc/passwd, /etc/shadow, /etc/group, /etc/gshadow, /etc/sudoers, /etc/sudoers.d/*
+  - [ ]  
+ 
