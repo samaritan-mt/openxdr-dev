@@ -75,17 +75,34 @@ impl EbpfKernel {
         Ok(())
     }
 
-    /**
-     * Open the execve events map
-     *
-     * @return: AsyncPerfEventArray : Array of events
-     */
-    pub fn open_execve_events(
-        &mut self,
-    ) -> anyhow::Result<AsyncPerfEventArray<&mut aya::maps::MapData>> {
+    pub fn attach_file_monitoring(&mut self) -> anyhow::Result<()> {
+        let program_openat: &mut TracePoint = self
+            .bpf
+            .program_mut("openat_enter")
+            .ok_or_else(|| anyhow::anyhow!("Program 'openat_enter' not found"))?
+            .try_into()?;
+        program_openat.load()?;
+        // attach to sys_enter_openat
+        let _ = program_openat.attach("syscalls/sys_enter_openat", "")?;
+
+        Ok(())
+    }
+
+    pub fn take_file_events(&mut self) -> anyhow::Result<AsyncPerfEventArray<aya::maps::MapData>> {
         let map = self
             .bpf
-            .map_mut("EVENTS")
+            .take_map("EVENTS_FILE")
+            .ok_or_else(|| anyhow::anyhow!("Map 'EVENTS_FILE' not found"))?;
+
+        AsyncPerfEventArray::try_from(map).map_err(Into::into)
+    }
+
+    pub fn take_execve_events(
+        &mut self,
+    ) -> anyhow::Result<AsyncPerfEventArray<aya::maps::MapData>> {
+        let map = self
+            .bpf
+            .take_map("EVENTS")
             .ok_or_else(|| anyhow::anyhow!("Map 'EVENTS' not found"))?;
 
         AsyncPerfEventArray::try_from(map).map_err(Into::into)

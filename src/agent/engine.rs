@@ -1,13 +1,11 @@
-
 /**
  * Engine to listen on AuditD and raise alarms if any rule is trigerred
  */
-
-use crate::agent::{Error, rule::Rule};
+use crate::agent::{rule::Rule, Error};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
 use std::process::Command;
-use serde::Serialize;
-use serde::Deserialize;
 
 /**
  * Event structure representing an audit event.
@@ -20,12 +18,14 @@ use serde::Deserialize;
  */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
-    pub event_type: String,    // e.g. "EXECVE"
-    pub process_name: String,  // "sudo"
+    pub event_type: String,   // e.g. "EXECVE"
+    pub process_name: String, // "sudo"
     pub uid: u32,
-    pub user_name: String,     // "root", "alice" (or "uid:1000" if you want)
+    pub user_name: String, // "root", "alice" (or "uid:1000" if you want)
     pub pid: u32,
-    pub cmdline: String,       // optional, can be empty
+    pub cmdline: String,           // optional, can be empty
+    pub syscall: Option<String>,   // e.g., "open", "write"
+    pub file_path: Option<String>, // e.g., "/etc/passwd"
 }
 
 /**
@@ -92,10 +92,97 @@ fn rule_matches(rule: &Rule, ev: &Event) -> bool {
         }
     }
 
+    if let Some(ref names) = m.process_name_in {
+        if !names.contains(&ev.process_name) {
+            return false;
+        }
+    }
+
     if let Some(ref list) = m.user_not_in {
         // if the current user is in the forbidden list, rule does NOT match
         if list.iter().any(|u: &String| u == &ev.user_name) {
             return false;
+        }
+    }
+
+    // FIM Checks
+    if let Some(ev_syscall) = &ev.syscall {
+        // Check syscall match
+        let mut syscall_matched = true;
+        if let Some(ref syscalls) = m.syscall {
+            if !syscalls.contains(ev_syscall) {
+                syscall_matched = false;
+            }
+        }
+        // Check syscall alias
+        if !syscall_matched {
+            if let Some(ref syscalls) = m.syscall_alias {
+                if syscalls.contains(ev_syscall) {
+                    syscall_matched = true;
+                }
+            }
+        }
+
+        // If matcher specified syscalls but none matched
+        if (m.syscall.is_some() || m.syscall_alias.is_some()) && !syscall_matched {
+            return false;
+        }
+    } else {
+        // If event has no syscall, but rule requires it?
+        if m.syscall.is_some() || m.syscall_alias.is_some() {
+            return false;
+        }
+    }
+
+    if let Some(ev_path) = &ev.file_path {
+        if let Some(ref paths) = m.file_path_in {
+            // simplified exact match for now
+            if !paths.contains(ev_path) {
+                return false;
+            }
+        }
+
+        if let Some(ref regex_str) = m.file_path_regex {
+            if let Ok(re) = regex::Regex::new(regex_str) {
+                if !re.is_match(ev_path) {
+                    return false;
+                }
+            } else {
+                // Invalid regex in rule, fail safe or ignore?
+                // Fail safe: doesn't match
+                return false;
+            }
+        }
+    } else {
+        if m.file_path_in.is_some() || m.file_path_regex.is_some() {
+            return false;
+        }
+    }
+
+    // Process path prefix
+    if let Some(ref prefixes) = m.process_path_prefix_in {
+        // We only have process_name (comm) or cmdline (args).
+        // Wait, existing event has `cmdline`. Using cmdline as full path?
+        // ExecveEvent has `filename` which corresponds to the executed binary path.
+        // engine::Event has `cmdline` mapped to `filename`.
+        // So checking ev.cmdline starts_with prefix.
+        if !prefixes.iter().any(|p| ev.cmdline.starts_with(p)) {
+            return false;
+        }
+    }
+
+    // Args regex
+    if let Some(ref regex_str) = m.args_regex {
+        // Check against cmdline (which might be just filename or full args depending on eBPF)
+        // Currently eBPF ExecveEvent captures `filename` (path) but not full args (argv).
+        // The rule `netcat_or_reverse_shell` expects arguments regex.
+        // My plan says "TODO: get full args" in main.rs line 76.
+        // So this check might fail or check only filename for now.
+        if let Ok(re) = regex::Regex::new(regex_str) {
+            if !re.is_match(&ev.cmdline) {
+                // This is weak but better than nothing
+                return false;
+            }
         }
     }
 
@@ -147,10 +234,9 @@ fn emit_alert_json(rule: &Rule, ev: &Event, destination: &str) {
  * Returns an Error if the operation fails or if the platform is unsupported.
  */
 pub fn open_auditd_socket() -> Result<(), Error> {
-    #[cfg(target_os = "linux")] {
-        let status = Command::new("auditctl")
-            .arg("-s")
-            .status()?;
+    #[cfg(target_os = "linux")]
+    {
+        let status = Command::new("auditctl").arg("-s").status()?;
         if status.success() {
             println!("Successfully opened auditd socket.");
             Ok(())
@@ -158,7 +244,8 @@ pub fn open_auditd_socket() -> Result<(), Error> {
             Err(Error::Other("Failed to open auditd socket".to_string()))
         }
     }
-    #[cfg(not(target_os = "linux"))] {
+    #[cfg(not(target_os = "linux"))]
+    {
         Err(Error::UnsupportedPlatform)
     }
 }
@@ -168,12 +255,14 @@ pub fn open_auditd_socket() -> Result<(), Error> {
  * Returns an Error if the operation fails or if the platform is unsupported.
  */
 pub fn listen_auditd_events() -> Result<(), Error> {
-    #[cfg(target_os = "linux")] {
+    #[cfg(target_os = "linux")]
+    {
         // Placeholder for listening to auditd events
         println!("Listening to auditd events...");
         Ok(())
     }
-    #[cfg(not(target_os = "linux"))] {
+    #[cfg(not(target_os = "linux"))]
+    {
         Err(Error::UnsupportedPlatform)
     }
 }
@@ -185,12 +274,14 @@ pub fn listen_auditd_events() -> Result<(), Error> {
  * Returns: Vec of matched rule IDs
  */
 pub fn match_event_to_rules(event: &str) -> Result<Vec<String>, Error> {
-    #[cfg(target_os = "linux")] {
+    #[cfg(target_os = "linux")]
+    {
         // Placeholder for matching events to rules
         println!("Matching event to rules: {}", event);
         Ok(vec![])
     }
-    #[cfg(not(target_os = "linux"))] {
+    #[cfg(not(target_os = "linux"))]
+    {
         Err(Error::UnsupportedPlatform)
     }
 }
@@ -199,14 +290,16 @@ pub fn match_event_to_rules(event: &str) -> Result<Vec<String>, Error> {
  * matched_rules - Vector of matched rule IDs
  */
 pub fn raise_alert(matched_rules: Vec<String>) -> Result<(), Error> {
-    #[cfg(target_os = "linux")] {
+    #[cfg(target_os = "linux")]
+    {
         // Placeholder for raising alerts
         for rule in matched_rules {
             println!("Raising alert for rule: {}", rule);
         }
         Ok(())
     }
-    #[cfg(not(target_os = "linux"))] {
+    #[cfg(not(target_os = "linux"))]
+    {
         Err(Error::UnsupportedPlatform)
     }
 }
@@ -216,14 +309,16 @@ pub fn raise_alert(matched_rules: Vec<String>) -> Result<(), Error> {
  * Returns an Error if the operation fails or if the platform is unsupported.
  */
 pub fn setup_ebpf_file_monitoring() -> Result<(), Error> {
-    #[cfg(target_os = "linux")] {
+    #[cfg(target_os = "linux")]
+    {
         // Placeholder for setting up eBPF hooks
         println!("Setting up eBPF file monitoring hooks...");
         // listen for file events and raise alerts
 
         Ok(())
     }
-    #[cfg(not(target_os = "linux"))] {
+    #[cfg(not(target_os = "linux"))]
+    {
         Err(Error::UnsupportedPlatform)
     }
 }

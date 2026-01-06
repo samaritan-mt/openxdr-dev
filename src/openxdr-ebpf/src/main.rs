@@ -13,10 +13,13 @@ use aya_ebpf::{
     EbpfContext,
 };
 
-use openxdr_common::ExecveEvent;
+use openxdr_common::{ExecveEvent, FileEvent};
 
 #[map]
 static EVENTS: PerfEventArray<ExecveEvent> = PerfEventArray::new(0);
+
+#[map]
+static EVENTS_FILE: PerfEventArray<FileEvent> = PerfEventArray::new(0);
 
 /**
  * Program entry point for `execve` syscall monitoring.
@@ -160,6 +163,80 @@ fn try_execve_enter(ctx: TracePointContext, filename_offset: usize) -> Result<u3
 
     EVENTS.output(&ctx, &event, 0);
 
+    Ok(0)
+}
+
+#[tracepoint]
+pub fn open_enter(ctx: TracePointContext) -> u32 {
+    // filename @ 16, flags @ 24
+    let _ = try_file_open(ctx, 24, 32);
+    0
+}
+
+#[tracepoint]
+pub fn openat_enter(ctx: TracePointContext) -> u32 {
+    // dfd @ 16, filename @ 24, flags @ 32
+    let _ = try_file_open(ctx, 24, 32);
+    0
+}
+
+#[inline(always)]
+fn try_file_open(
+    ctx: TracePointContext,
+    filename_offset: usize,
+    flags_offset: usize,
+) -> Result<u32, u32> {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let pid = (pid_tgid >> 32) as u32;
+    let uid_gid = bpf_get_current_uid_gid();
+    let uid = (uid_gid >> 32) as u32;
+
+    let flags: u64 = unsafe { ctx.read_at(flags_offset).unwrap_or(0) };
+
+    // Minimal filter to reduce noise (don't trace pure reads):
+    // Check if lower bits are non-zero (WRONLY=1, RDWR=2) or other flags.
+    let is_write = (flags & 0b11) != 0
+        || (flags & 0o100) != 0
+        || (flags & 0o1000) != 0
+        || (flags & 0o2000) != 0;
+
+    if !is_write {
+        return Ok(0);
+    }
+
+    let mut event = FileEvent {
+        path: [0; 128],
+        flags: flags as u32,
+        pid,
+        uid,
+        comm: [0; 16],
+    };
+
+    if let Ok(comm) = ctx.command() {
+        let len = comm.len().min(16);
+        event.comm[..len].copy_from_slice(&comm[..len]);
+    }
+
+    unsafe {
+        let filename_ptr: u64 = ctx.read_at(filename_offset).unwrap_or(0);
+        let _ = bpf_printk!(b"File name pointer hex: 0x%lx\0", filename_ptr);
+        if filename_ptr != 0 {
+            // Try reading filename
+            let msb_set = (filename_ptr & (1 << 63)) != 0;
+            if msb_set {
+                let _ = bpf_probe_read_kernel_str_bytes(filename_ptr as *const u8, &mut event.path);
+            } else {
+                if bpf_probe_read_user_str_bytes(filename_ptr as *const u8, &mut event.path)
+                    .is_err()
+                {
+                    let _ =
+                        bpf_probe_read_kernel_str_bytes(filename_ptr as *const u8, &mut event.path);
+                }
+            }
+        }
+    }
+
+    EVENTS_FILE.output(&ctx, &event, 0);
     Ok(0)
 }
 
