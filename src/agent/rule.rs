@@ -3,7 +3,12 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use crate::agent::{self, Error};
+use regex::Regex;
+
+use crate::agent::{
+    engine::{CompiledMatcher, CompiledRule},
+    Error,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct RuleSet {
@@ -42,7 +47,45 @@ pub struct Match {
     pub args_regex: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+impl Rule {
+    pub fn compile(&self) -> Result<CompiledRule, anyhow::Error> {
+        let file_path_regex = match &self.matcher.file_path_regex {
+            Some(s) => {
+                Some(Regex::new(s).map_err(|e| anyhow::anyhow!("Invalid file_path_regex: {}", e))?)
+            }
+            None => None,
+        };
+
+        let args_regex = match &self.matcher.args_regex {
+            Some(s) => {
+                Some(Regex::new(s).map_err(|e| anyhow::anyhow!("Invalid args_regex: {}", e))?)
+            }
+            None => None,
+        };
+
+        let matcher = CompiledMatcher {
+            event_type: self.matcher.event_type.clone(),
+            process_name: self.matcher.process_name.clone(),
+            user_not_in: self.matcher.user_not_in.clone(),
+            file_path_in: self.matcher.file_path_in.clone(),
+            file_path_prefix: self.matcher.process_path_prefix_in.clone(),
+            process_name_in: self.matcher.process_name_in.clone(),
+            file_path_regex,
+            args_regex,
+        };
+
+        Ok(CompiledRule {
+            id: self.id.clone(),
+            description: self.description.clone(),
+            severity: self.severity.clone(),
+            os: self.os.clone(),
+            matcher,
+            actions: self.actions.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct Action {
     #[serde(rename = "type")]
     pub action_type: String, // "alert_json", etc.

@@ -13,7 +13,8 @@ pub struct ExecveEvent {
     pub pid: u32,
     pub uid: u32,
     pub comm: [u8; 16],
-    pub filename: [u8; 128],
+    pub filename: [u8; 512],
+    pub args: Option<[u8; 128]>,
 }
 /**
  * File event structure

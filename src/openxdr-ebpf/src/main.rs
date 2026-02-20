@@ -2,13 +2,12 @@
 #![no_main]
 
 use aya_ebpf::{
-    helpers::bpf_get_current_pid_tgid,
-    helpers::bpf_get_current_uid_gid,
-    helpers::bpf_printk,
-    helpers::bpf_probe_read_kernel_str_bytes,
-    helpers::bpf_probe_read_user_str_bytes,
+    helpers::{
+        bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_printk, bpf_probe_read_kernel,
+        bpf_probe_read_kernel_str_bytes, bpf_probe_read_user, bpf_probe_read_user_str_bytes,
+    },
     macros::{map, tracepoint},
-    maps::PerfEventArray,
+    maps::{PerCpuArray, PerfEventArray},
     programs::TracePointContext,
     EbpfContext,
 };
@@ -20,6 +19,9 @@ static EVENTS: PerfEventArray<ExecveEvent> = PerfEventArray::new(0);
 
 #[map]
 static EVENTS_FILE: PerfEventArray<FileEvent> = PerfEventArray::new(0);
+
+#[map]
+static SCRATCH: PerCpuArray<[u8; 4096]> = PerCpuArray::with_max_entries(1, 0);
 
 /**
  * Program entry point for `execve` syscall monitoring.
@@ -89,79 +91,125 @@ pub fn execveat_enter(ctx: TracePointContext) -> u32 {
  */
 #[inline(always)]
 fn try_execve_enter(ctx: TracePointContext, filename_offset: usize) -> Result<u32, u32> {
+    // 1. Get access to the scratch buffer to avoid stack allocation of the large ExecveEvent
+    let buf_ptr = match SCRATCH.get_ptr_mut(0) {
+        Some(ptr) => ptr,
+        None => {
+            unsafe {
+                let _ = bpf_printk!(b"ERROR: SCRATCH lookup failed\0");
+            }
+            return Err(0);
+        }
+    };
+
+    // 2. Cast the scratch buffer to our event struct
+    // Safety: SCRATCH is 4096 bytes, ExecveEvent is ~670 bytes. alignment should be sufficient.
+    let event = unsafe { &mut *(buf_ptr as *mut ExecveEvent) };
+
     let pid_tgid = bpf_get_current_pid_tgid();
-    let pid = (pid_tgid >> 32) as u32;
+    event.pid = (pid_tgid >> 32) as u32;
 
     let uid_gid = bpf_get_current_uid_gid();
-    let uid = (uid_gid >> 32) as u32;
+    event.uid = (uid_gid >> 32) as u32;
 
     unsafe {
-        match bpf_printk!(b"exec entry: pid %u uid %u\0", pid as u64, uid as u64) {
-            _ => {}
-        }
+        let _ = bpf_printk!(
+            b"exec entry: pid %u uid %u\0",
+            event.pid as u64,
+            event.uid as u64
+        );
     }
 
-    let mut event = ExecveEvent {
-        pid: pid,
-        uid: uid,
-        comm: [0; 16],
-        filename: [0; 128],
-    };
+    // Clear fields that might have old data from previous runs (since it's a shared per-cpu buffer)
+    // We don't need to zero the whole arrays if we track length, but for safety/simplicity:
+    event.comm = [0; 16];
+    event.filename = [0; 512];
+    event.args = None; // Reset option
 
     if let Ok(comm) = ctx.command() {
         let len = comm.len().min(16);
         event.comm[..len].copy_from_slice(&comm[..len]);
-    } else {
-        let _ = unsafe { bpf_printk!(b"failed to read command name\0") };
     }
 
     unsafe {
         let filename_ptr: u64 = ctx.read_at(filename_offset).unwrap_or(0);
-        let _ = bpf_printk!(b"filename_ptr: 0x%lx\0", filename_ptr);
+        let args_ptr: u64 = ctx.read_at(filename_offset + 8).unwrap_or(0);
 
-        if filename_ptr != 0 {
-            let msb_set = (filename_ptr & (1 << 63)) != 0;
+        // Try to read arguments
+        if args_ptr != 0 {
+            // Read argv[0] pointer
+            match bpf_probe_read_user(args_ptr as *const u64) {
+                Ok(arg0_ptr) => {
+                    if arg0_ptr != 0 {
+                        // Read argv[0] string
+                        let _ = bpf_probe_read_user_str_bytes(
+                            arg0_ptr as *const u8,
+                            &mut event.filename,
+                        );
 
-            if msb_set {
-                match bpf_probe_read_kernel_str_bytes(
-                    filename_ptr as *const u8,
-                    &mut event.filename,
-                ) {
-                    Ok(len) => {
-                        let _ = bpf_printk!(b"kernel read success, len: %u\0", len.len() as u64);
-                    }
-                    Err(e) => {
-                        let _ = bpf_printk!(b"kernel read failed: %ld\0", e);
+                        // Try to read argv[1] into args
+                        let arg1_ptr_addr = args_ptr + 8;
+                        match bpf_probe_read_user(arg1_ptr_addr as *const u64) {
+                            Ok(arg1_ptr) => {
+                                if arg1_ptr != 0 {
+                                    // We need a temporary buffer for args if we want to copy it to event.args
+                                    // event.args is Option<[u8; 128]>.
+                                    // We can map another part of scratch for temp work if needed,
+                                    // but bpf_probe_read_user_str_bytes writes directly to dst.
+                                    let mut args_buf = [0u8; 128];
+                                    // Valid question: is [0u8; 128] safe on stack? Yes. total stack < 512.
+                                    // 128 is fine. The compiled event was 600+.
+                                    match bpf_probe_read_user_str_bytes(
+                                        arg1_ptr as *const u8,
+                                        &mut args_buf,
+                                    ) {
+                                        Ok(_) => {
+                                            event.args = Some(args_buf);
+                                        }
+                                        Err(_) => {}
+                                    }
+                                }
+                            }
+                            Err(_) => {}
+                        }
                     }
                 }
-            } else {
-                if let Ok(len) =
-                    bpf_probe_read_user_str_bytes(filename_ptr as *const u8, &mut event.filename)
-                {
-                    let _ = bpf_printk!(b"user read success, len: %u\0", len.len() as u64);
-                } else {
-                    match bpf_probe_read_kernel_str_bytes(
-                        filename_ptr as *const u8,
-                        &mut event.filename,
-                    ) {
-                        Ok(len) => {
-                            let _ = bpf_printk!(
-                                b"fallback kernel read success, len: %u\0",
-                                len.len() as u64
-                            );
+                Err(_) => {
+                    // Fallback to kernel read for argv[0] pointer
+                    match bpf_probe_read_kernel(args_ptr as *const u64) {
+                        Ok(arg0_ptr) => {
+                            if arg0_ptr != 0 {
+                                let _ = bpf_probe_read_kernel_str_bytes(
+                                    arg0_ptr as *const u8,
+                                    &mut event.filename,
+                                );
+                            }
                         }
-                        Err(e) => {
-                            let _ = bpf_printk!(b"fallback kernel read failed: %ld\0", e);
-                        }
+                        Err(_) => {}
                     }
                 }
             }
-        } else {
-            let _ = bpf_printk!(b"filename_ptr is null\0");
+        }
+
+        if filename_ptr != 0 {
+            let msb_set = (filename_ptr & (1 << 63)) != 0;
+            if msb_set {
+                let _ =
+                    bpf_probe_read_kernel_str_bytes(filename_ptr as *const u8, &mut event.filename);
+            } else {
+                if bpf_probe_read_user_str_bytes(filename_ptr as *const u8, &mut event.filename)
+                    .is_err()
+                {
+                    let _ = bpf_probe_read_kernel_str_bytes(
+                        filename_ptr as *const u8,
+                        &mut event.filename,
+                    );
+                }
+            }
         }
     }
 
-    EVENTS.output(&ctx, &event, 0);
+    EVENTS.output(&ctx, event, 0);
 
     Ok(0)
 }
@@ -219,7 +267,7 @@ fn try_file_open(
 
     unsafe {
         let filename_ptr: u64 = ctx.read_at(filename_offset).unwrap_or(0);
-        let _ = bpf_printk!(b"File name pointer hex: 0x%lx\0", filename_ptr);
+        //let _ = bpf_printk!(b"File name pointer hex: 0x%lx\0", filename_ptr);
         if filename_ptr != 0 {
             // Try reading filename
             let msb_set = (filename_ptr & (1 << 63)) != 0;

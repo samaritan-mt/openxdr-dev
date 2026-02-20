@@ -1,52 +1,94 @@
-## OpenXDR Agent (Rust + eBPF)
+# OpenXDR Agent - Implementation Plan & Status
 
-OpenXDR is a high-performance Linux security agent that leverages **eBPF (Extended Berkeley Packet Filter)** for deep kernel-level visibility. It is designed to capture security-relevant events with minimal overhead and high tamper resistance.
+**Goal**: Build a high-performance, tamper-resistant Linux security agent using eBPF for deep kernel visibility and Rust for safe, fast user-space processing.
 
-### Key Features
-- **eBPF-based Event Capture**: Uses kernel tracepoints (`sys_enter_execve`, `sys_enter_execveat`) to capture process executions directly from the kernel.
-- **Safe & Fast**: Written in Rust using the [Aya](https://aya-rs.dev/) framework for strict type safety and memory safety.
-- **Robustness**: Handles high-throughput event streams and gracefully handles kernel memory reads.
-- **Hardening**: Runs as a separate process from the kernel logic, maintaining stability.
+## Project Status Dashboard
 
-## Architecture
+| Component | Status | Description |
+|-----------|--------|-------------|
+| **Kernel Probes (eBPF)** | Stable | `execve`, `execveat`, and basic file monitoring implemented. |
+| **User-Space Agent** | In Progress | Event loop active, rule engine connected. Refinement needed. |
+| **Detection Engine** | In Progress | Basic rule matching works. Aggregation/Correlation pending. |
+| **Outputs & Integration** | Pending | JSON logs only. No remote transport or TLS yet. |
 
-The project consists of two main components:
-1.  **Kernel Probes (`openxdr-ebpf`)**: eBPF programs written in Rust that attach to kernel tracepoints and forward events to user space via `perf_event_array`.
-2.  **User-Space Agent**: A Rust application that loads the eBPF programs, consumes events, applies normalization, and (planned) evaluates detection rules.
+---
 
-## Roadmap
+## Architecture & Workspace
 
-- [ ] **Phase 0 – Design & Foundation**
-  - [x] Define goals: eBPF-based monitoring for performance and evasion resistance.
-  - [x] Set up project structure with workspace support (`openxdr-common`, `agent-ebpf`, `agent`).
+The project is organized as a Cargo workspace with the following members:
+- **`openxdr-agent`**: The main user-space application (Root).
+- **`openxdr-ebpf`** / **`agent-ebpf`**: The eBPF kernel probes (Kernel space).
+- **`openxdr-common`**: Shared types and definitions between kernel and user space.
 
-- [ ] **Phase 1 – Kernel Visibility (eBPF)**
-  - [x] Implement standard `execve` monitoring (PID, UID, Command, Filename).
-  - [x] Implement `execveat` support for modern execution flows.
-  - [x] Robust filename reading (handling user vs. kernel space pointers).
+---
 
-- [ ] **Phase 2 – User-Space Agent**
-  - [x] Load and attach eBPF programs using Aya.
-  - [x] Efficient async event reading loop (Tokio).
-  - [x] Basic event parsing and logging to stdout.
+## Implementation Roadmap
 
-- [ ] **Phase 3 – Dynamic Rules & Alerting**
-  - [x] Design initial rule format (`rules.yaml`).
-  - [x] Implement basic config and rule loading.
-  - [ ] **Next**: Connect eBPF event stream to the rule engine for real-time detection.
-  - [ ] Implement aggregation rules (time-window based).
+### Phase 1: Foundation (Completed)
+- [x] **Project Setup**: Workspace configuration for `openxdr-common`, `agent-ebpf`, and `agent`.
+- [x] **Core Dependencies**: Aya (eBPF framework), Tokio (Async runtime), Serde.
+- [x] **Design**: Defined architecture for separate kernel/user processes.
 
-- [ ] **Phase 4 – Outputs & Integration**
-  - [ ] Structured JSON logging / Syslog integration.
-  - [ ] TLS transport to backend/console.
+### Phase 2: Kernel Visibility (eBPF) (Active)
+- [x] **Process Execution**: 
+    - [x] `sys_enter_execve`: Capture Command, PID, UID.
+    - [x] `sys_enter_execveat`: Support different execution paths.
+    - [x] Filename Extraction: Robust user-space pointer reading.
+- [x] **File Integrity Monitoring (FIM)**:
+    - [x] Basic `open` syscall monitoring.
+    - [ ] Monitoring modification/write events (critical files like `/etc/passwd`).
+    - [ ] Path filtering optimization.
 
-## Legacy Note
-*Earlier concepts involving `auditd` have been superseded by the direct eBPF approach to ensure better performance and granular control.*
-*The choice of ebpf was made regarding the difficulties to listen to auditd events from the source*
+### Phase 3: User-Space Agent & Detection (Active)
+- [x] **Event Loop**: Efficient async reading of `perf_event_array` with Tokio.
+- [x] **Rule Engine Integration**:
+    - [x] `rules.yaml` format design.
+    - [x] Loading and parsing rules.
+    - [x] In-memory matching against live eBPF events.
+- [ ] **Advanced Detection**:
+    - [ ] Aggregation/Time-window rules (e.g., "5 failed logins in 1 minute").
+    - [ ] Stateful detection.
 
-## TODO
+### Phase 4: Outputs & Enterprise Features (Planned)
+- [ ] **Structured Logging**: JSON output to stdout/file (Partially done).
+- [ ] **Remote Transport**: TLS implementation for sending alerts to a backend.
+- [ ] **Self-Protection**: Prevent agent process termination.
 
-- [ ]  Implement File Integrity Monitoring (FIM)
-  - [ ] Using eBPF listen for any file modification for critical files such as /etc/passwd, /etc/shadow, /etc/group, /etc/gshadow, /etc/sudoers, /etc/sudoers.d/*
-  - [ ]  
- 
+---
+
+## Developer Guide
+
+### Prerequisites
+1.  **Rust Nightly**: Required for compiling eBPF programs.
+    ```bash
+    rustup install nightly
+    rustup component add rust-src --toolchain nightly
+    ```
+2.  **bpf-linker**:
+    ```bash
+    cargo install bpf-linker
+    ```
+
+### Build & Run
+1.  **Build eBPF Probes**:
+    ```bash
+    cargo xtask build-ebpf
+    ```
+    *Note: If `xtask` is not set up, build directly via `cargo +nightly build -Z build-std=core --target bpfel-unknown-none --release -p openxdr-ebpf`*
+
+2.  **Build Userspace Agent**:
+    ```bash
+    cargo build
+    ```
+
+3.  **Run (Root Required)**:
+    ```bash
+    sudo ./target/debug/openxdr-agent
+    ```
+
+---
+
+## Latest Updates
+- **[Feature]**: Connected eBPF event stream to the rule engine.
+- **[Feature]**: Added basic File Integrity Monitoring (FIM) hooks.
+- **[Fix]**: Resolved `EVENTS` scope issues in eBPF probes.

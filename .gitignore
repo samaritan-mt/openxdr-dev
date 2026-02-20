@@ -3,3 +3,5 @@ cargo.lock
 *.log
 .DS_Store
 .vscode/*
+.agent/*
+docs/*
