@@ -1,24 +1,18 @@
-use crate::agent::rule::Action;
-/**
- * Engine to listen on AuditD and raise alarms if any rule is trigerred
- */
-use crate::agent::{rule::Rule, Error};
-use regex::Regex;
+use openxdr_common::KernelRule;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-
-#[cfg(target_os = "linux")]
-use std::process::Command;
+use std::fs;
+use std::path::Path;
 
 /**
  * Event structure representing an audit event.
- * event_type - Type of the event (e.g., "EXECVE")
- * process_name - Name of the process (e.g., "sudo")
- * uid - User ID
- * user_name - User name (e.g., "root", "alice")
- * pid - Process ID
- * cmdline - Command line arguments
  */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkDetails<'a> {
+    pub dest_ip: Cow<'a, str>,
+    pub dest_port: u16,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event<'a> {
     pub event_type: Cow<'a, str>,   // e.g. "EXECVE"
@@ -26,315 +20,185 @@ pub struct Event<'a> {
     pub uid: u32,
     pub user_name: Cow<'a, str>, // "root", "alice" (or "uid:1000" if you want)
     pub pid: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cmdline: Option<Cow<'a, str>>,   // optional, can be empty
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub syscall: Option<Cow<'a, str>>,   // e.g., "open", "write"
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub file_path: Option<Cow<'a, str>>, // e.g., "/etc/passwd"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkDetails<'a>>, // Network details if applicable
 }
 
-#[derive(Debug, Clone)]
-pub struct CompiledRule {
-    pub id: String,
-    pub description: String,
-    pub severity: String,
-    pub os: String,
-    pub matcher: CompiledMatcher,
-    pub actions: Vec<Action>,
+#[derive(Deserialize, Debug)]
+struct SigmaLogsource {
+    category: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct CompiledMatcher {
-    // Exact struct fields from Match, but Regexes are compiled
-    pub event_type: Option<String>,
-    pub process_name: Option<String>,
-    pub user_not_in: Option<Vec<String>>,
-    pub file_path_in: Option<Vec<String>>,
-    pub file_path_prefix: Option<Vec<String>>,
-    pub process_name_in: Option<Vec<String>>,
-    pub file_path_regex: Option<Regex>, // <--- Compiled!
-    pub args_regex: Option<Regex>,      // <--- Compiled!
-}
-
-/**
- * Engine structure that holds the rules and processes events.
- * rules - Vector of rules to apply
- */
-
-#[derive(Debug)]
 pub struct Engine {
-    rules: Vec<CompiledRule>,
+    sigma_engine: null_sigma::engine::SigmaEngine,
+    kernel_rules: Vec<KernelRule>,
 }
-/**
- * Implementation of the Engine.
- */
+
 impl Engine {
-    pub fn new(rules: Vec<CompiledRule>) -> Self {
-        Engine { rules }
+    pub fn new<P: AsRef<Path>>(rules_dir: P) -> Self {
+        let mut sigma_engine = null_sigma::engine::SigmaEngine::new();
+        let mut kernel_rules = Vec::new();
+
+        if let Ok(entries) = fs::read_dir(rules_dir) {
+            for entry in entries.flatten() {
+                if entry.path().extension().and_then(|s| s.to_str()) == Some("yml") {
+                    if let Ok(content) = fs::read_to_string(entry.path()) {
+                        // 1. Load into Sigma Engine
+                        if let Err(e) = sigma_engine.load_rule(&content) {
+                            eprintln!("Failed to load rule {:?}: {:?}", entry.path(), e);
+                            continue;
+                        }
+
+                        // 2. Parse manually to extract KernelRule fast-paths
+                        if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+                            let mut event_type = 0;
+                            if let Some(logsource) = yaml.get("logsource") {
+                                if let Some(cat) = logsource.get("category").and_then(|c| c.as_str()) {
+                                    match cat {
+                                        "process_creation" => event_type = 1,
+                                        "syscall" => event_type = 2,
+                                        "lsm" => event_type = 3,
+                                        "network" => event_type = 4, // Might not have dedicated eBPF event_type for network yet, but let's be safe
+                                        _ => {}
+                                    }
+                                }
+                            }
+
+                            let mut images = Vec::new();
+                            let mut targets = Vec::new();
+
+                            if let Some(detection) = yaml.get("detection").and_then(|d| d.as_mapping()) {
+                                for (sel_key, sel_val) in detection {
+                                    let sel_name = sel_key.as_str().unwrap_or("");
+                                    if sel_name.starts_with("selection") {
+                                        if let Some(map) = sel_val.as_mapping() {
+                                            for (k, v) in map {
+                                                if let Some(k_str) = k.as_str() {
+                                                    let base_key = k_str.split('|').next().unwrap_or(k_str);
+                                                    if base_key == "Image" {
+                                                        extract_strings(v, &mut images);
+                                                    } else if base_key == "TargetFilename" {
+                                                        extract_strings(v, &mut targets);
+                                                    } else if base_key == "Syscall" {
+                                                        let mut sys = Vec::new();
+                                                        extract_strings(v, &mut sys);
+                                                        if sys.iter().any(|s| s == "init_module" || s == "finit_module") {
+                                                            event_type = 4;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if images.is_empty() { images.push("".to_string()); }
+                            if targets.is_empty() { targets.push("".to_string()); }
+
+                            for img in &images {
+                                for tgt in &targets {
+                                    let mut kr = KernelRule {
+                                        event_type,
+                                        check_comm: 0,
+                                        comm: [0; 16],
+                                        check_path: 0,
+                                        path: [0; 64],
+                                    };
+
+                                    if !img.is_empty() {
+                                        kr.check_comm = 1;
+                                        let bytes = img.as_bytes();
+                                        let len = bytes.len().min(16);
+                                        kr.comm[..len].copy_from_slice(&bytes[..len]);
+                                    }
+
+                                    if !tgt.is_empty() {
+                                        kr.check_path = 1;
+                                        let bytes = tgt.as_bytes();
+                                        let len = bytes.len().min(64);
+                                        kr.path[..len].copy_from_slice(&bytes[..len]);
+                                    }
+
+                                    kernel_rules.push(kr);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Self { sigma_engine, kernel_rules }
+    }
+
+    pub fn compile_kernel_rules(&self) -> Vec<KernelRule> {
+        let mut capped = Vec::new();
+        for (i, r) in self.kernel_rules.iter().enumerate() {
+            if i >= 512 { break; }
+            capped.push(*r);
+        }
+        capped
     }
 
     pub fn process_event(&self, ev: &Event) {
-        for rule in &self.rules {
-            // quick OS filter
-            if rule.os != "linux" {
-                continue;
-            }
-
-            if !rule_matches(rule, ev) {
-                continue;
-            }
-
-            self.execute_actions(rule, ev);
+        let mut map = std::collections::HashMap::new();
+        
+        let cat = match ev.event_type.as_ref() {
+            "EXECVE" => "process_creation",
+            "SYSCALL" => "syscall",
+            "LSM" => "lsm",
+            other => other,
+        };
+        map.insert("category".to_string(), cat.to_string());
+        map.insert("product".to_string(), "linux".to_string());
+        
+        map.insert("Image".to_string(), ev.process_name.to_string());
+        map.insert("User".to_string(), ev.user_name.to_string());
+        
+        if let Some(cmd) = &ev.cmdline {
+            map.insert("CommandLine".to_string(), cmd.to_string());
         }
-    }
-
-    fn execute_actions(&self, rule: &CompiledRule, ev: &Event) {
-        for action in &rule.actions {
-            match action.action_type.as_str() {
-                "alert_json" => emit_alert_json(rule, ev, &action.destination),
-                _ => {
-                    // ignore unknown action types for now
-                }
-            }
+        if let Some(path) = &ev.file_path {
+            map.insert("TargetFilename".to_string(), path.to_string());
         }
-    }
-}
-/**
- * Check if a rule matches an event
- * rule - The rule to check
- * ev - The event to check against
- * Returns: true if the rule matches the event, false otherwise
- */
-fn rule_matches(rule: &CompiledRule, ev: &Event) -> bool {
-    let m = &rule.matcher;
-
-    if let Some(ref t) = m.event_type {
-        if t != &ev.event_type {
-            return false;
+        if let Some(sys) = &ev.syscall {
+            map.insert("Syscall".to_string(), sys.to_string());
         }
-    }
-
-    if let Some(ref name) = m.process_name {
-        if name != &ev.process_name {
-            return false;
-        }
-    }
-
-    if let Some(ref names) = m.process_name_in {
-        let process_name = ev.process_name.as_ref();
-        if !names.contains(&process_name.to_string()) {
-            return false;
-        }
-    }
-
-    if let Some(ref list) = m.user_not_in {
-        // if the current user is in the forbidden list, rule does NOT match
-        if list.iter().any(|u: &String| u == &ev.user_name) {
-            return false;
-        }
-    }
-
-    // FIM Checks
-    if let Some(ev_syscall) = &ev.syscall {
-        // Check syscall match
-        let mut syscall_matched = true;
-        if let Some(ref syscalls) = m.event_type {
-            if !syscalls.contains(ev_syscall.as_ref()) {
-                syscall_matched = false;
-            }
-        }
-        // Check syscall alias
-        if !syscall_matched {
-            if let Some(ref syscalls) = m.event_type {
-                if syscalls.contains(ev_syscall.as_ref()) {
-                    syscall_matched = true;
-                }
-            }
+        if let Some(net) = &ev.network {
+            map.insert("DestinationIp".to_string(), net.dest_ip.to_string());
+            map.insert("DestinationPort".to_string(), net.dest_port.to_string());
         }
 
-        // If matcher specified syscalls but none matched
-        if (m.event_type.is_some()) && !syscall_matched {
-            return false;
-        }
-    } else {
-        // If event has no syscall, but rule requires it?
-        if m.event_type.is_some() {
-            return false;
-        }
-    }
-
-    if let Some(ev_path) = &ev.file_path {
-        if let Some(ref paths) = m.file_path_in {
-            // simplified exact match for now
-            if !paths.contains(&ev_path.to_string()) {
-                return false;
-            }
-        }
-
-        if let Some(ref regex_str) = m.file_path_regex {
-            if !regex_str.is_match(ev_path) {
-                return false;
-            }
-        }
-    } else {
-        if m.file_path_in.is_some() || m.file_path_regex.is_some() {
-            return false;
-        }
-    }
-
-    // Process path prefix
-    if let Some(ref prefixes) = m.process_name_in {
-        // We only have process_name (comm) or cmdline (args).
-        if !prefixes.iter().any(|p| ev.process_name.starts_with(p)) {
-            return false;
-        }
-    }
-
-    // Args regex
-    if let Some(ref args_re) = m.args_regex {
-        // Check against cmdline (which might be just filename or full args depending on eBPF)
-        // Currently eBPF ExecveEvent captures `filename` (path) but not full args (argv).
-        // The rule `netcat_or_reverse_shell` expects arguments regex.
-        // My plan says "TODO: get full args" in main.rs line 76.
-        // So this check might fail or check only filename for now.
-        if let Some(args) = &ev.cmdline {
-            if !args_re.is_match(args) {
-                return false;
-            }
-        }
-    }
-
-    true
-}
-/**
- * Alert structure for JSON output
- * id - Rule ID
- * description - Rule description
- * severity - Rule severity
- * event - The event that triggered the alert
- */
-#[derive(Debug, Serialize)]
-struct Alert<'a> {
-    id: &'a str,
-    description: &'a str,
-    severity: &'a str,
-    event: &'a Event<'a>,
-}
-
-/**
- * Emit alert in JSON format to the specified destination
- * rule - The rule that triggered the alert
- * ev - The event that triggered the alert
- * destination - Where to send the alert (e.g., "stdout", "stderr", "file:/path", "tcp:host:port")
- */
-fn emit_alert_json(rule: &CompiledRule, ev: &Event, destination: &str) {
-    let alert = Alert {
-        id: &rule.id,
-        description: &rule.description,
-        severity: &rule.severity,
-        event: ev,
-    };
-
-    let json = serde_json::to_string(&alert).unwrap_or_else(|_| "{}".to_string());
-
-    match destination {
-        "stdout" => {
-            println!("{json}");
-        }
-        // you can add "stderr", "file:/path", "tcp:host:port", etc. later
-        _ => {
-            // ignore for now
+        let matches = self.sigma_engine.evaluate_event(&map);
+        for m in matches {
+            let event_json = serde_json::to_string(&ev).unwrap_or_else(|_| "{}".to_string());
+            println!(
+                r#"{{"id": "{}", "title": "{}", "severity": "{}", "event": {}}}"#,
+                m.rule_id, m.rule_title, m.rule_level, event_json
+            );
         }
     }
 }
-/**
- * Open AuditD socket to listen for events
- * Returns an Error if the operation fails or if the platform is unsupported.
- */
-pub fn open_auditd_socket() -> Result<(), Error> {
-    #[cfg(target_os = "linux")]
-    {
-        let status = Command::new("auditctl").arg("-s").status()?;
-        if status.success() {
-            println!("Successfully opened auditd socket.");
-            Ok(())
-        } else {
-            Err(Error::Other("Failed to open auditd socket".to_string()))
+
+fn extract_strings(v: &serde_yaml::Value, out: &mut Vec<String>) {
+    if let Some(s) = v.as_str() {
+        // null-sigma rule matching checks exact strings. 
+        // We will strip wildcards for our kernel fast-path
+        let clean = s.replace("*", "").replace("^", "").replace("$", "");
+        out.push(clean);
+    } else if let Some(seq) = v.as_sequence() {
+        for item in seq {
+            if let Some(s) = item.as_str() {
+                let clean = s.replace("*", "").replace("^", "").replace("$", "");
+                out.push(clean);
+            }
         }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        Err(Error::UnsupportedPlatform)
-    }
-}
-
-/**
- * Listen for AuditD events
- * Returns an Error if the operation fails or if the platform is unsupported.
- */
-pub fn listen_auditd_events() -> Result<(), Error> {
-    #[cfg(target_os = "linux")]
-    {
-        // Placeholder for listening to auditd events
-        println!("Listening to auditd events...");
-        Ok(())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        Err(Error::UnsupportedPlatform)
-    }
-}
-
-/**
- * Match AuditD events to rules
- * Returns a vector of matched rule IDs or an Error if the operation fails or if the platform is unsupported.
- * event - The audit event as a string
- * Returns: Vec of matched rule IDs
- */
-pub fn match_event_to_rules(event: &str) -> Result<Vec<String>, Error> {
-    #[cfg(target_os = "linux")]
-    {
-        // Placeholder for matching events to rules
-        println!("Matching event to rules: {}", event);
-        Ok(vec![])
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        Err(Error::UnsupportedPlatform)
-    }
-}
-/**
- * Raise alerts based on matched rules
- * matched_rules - Vector of matched rule IDs
- */
-pub fn raise_alert(matched_rules: Vec<String>) -> Result<(), Error> {
-    #[cfg(target_os = "linux")]
-    {
-        // Placeholder for raising alerts
-        for rule in matched_rules {
-            println!("Raising alert for rule: {}", rule);
-        }
-        Ok(())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        Err(Error::UnsupportedPlatform)
-    }
-}
-
-/**
- * Set up eBPF file monitoring hooks
- * Returns an Error if the operation fails or if the platform is unsupported.
- */
-pub fn setup_ebpf_file_monitoring() -> Result<(), Error> {
-    #[cfg(target_os = "linux")]
-    {
-        // Placeholder for setting up eBPF hooks
-        println!("Setting up eBPF file monitoring hooks...");
-        // listen for file events and raise alerts
-
-        Ok(())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        Err(Error::UnsupportedPlatform)
     }
 }

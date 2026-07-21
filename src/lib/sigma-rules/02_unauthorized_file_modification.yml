@@ -1,0 +1,18 @@
+title: Detect edits to protected system files by non-root users
+id: unauthorized_file_modification
+logsource:
+    product: linux
+    category: syscall
+detection:
+    selection:
+        Syscall:
+            - "open"
+            - "openat"
+            - "write"
+        TargetFilename:
+            - "/etc/passwd"
+            - "/etc/shadow"
+            - "/etc/sudoers"
+    filter:
+        User: "root"
+    condition: selection and not filter

@@ -1,0 +1,19 @@
+title: Detect netcat launched with reverse-shell flags
+id: netcat_or_reverse_shell
+logsource:
+    product: linux
+    category: process_creation
+detection:
+    selection:
+        TargetFilename:
+            - "/bin/nc"
+            - "/usr/bin/nc"
+            - "/bin/netcat"
+            - "/usr/bin/netcat"
+            - "/bin/ncat"
+            - "/usr/bin/ncat"
+        CommandLine|contains:
+            - "-e"
+            - "-c"
+            - "/dev/tcp/"
+    condition: selection

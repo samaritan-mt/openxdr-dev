@@ -1,0 +1,13 @@
+title: Detect sudo execution by non-admin users
+id: suspicious_sudo
+logsource:
+    product: linux
+    category: process_creation
+detection:
+    selection:
+        TargetFilename: 
+            - "/usr/bin/sudo"
+            - "/bin/sudo"
+    filter:
+        User: "root"
+    condition: selection and not filter

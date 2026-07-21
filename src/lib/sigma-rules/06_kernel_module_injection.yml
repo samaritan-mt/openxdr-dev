@@ -1,0 +1,11 @@
+title: Monitor for attempts to load kernel modules
+id: kernel_module_injection
+logsource:
+    product: linux
+    category: syscall
+detection:
+    selection:
+        Syscall:
+            - "init_module"
+            - "finit_module"
+    condition: selection

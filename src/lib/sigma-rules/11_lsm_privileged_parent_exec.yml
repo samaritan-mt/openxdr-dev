@@ -1,0 +1,18 @@
+title: LSM sudo/su/pkexec is launching a subprocess
+id: lsm_privileged_parent_exec
+logsource:
+    product: linux
+    category: lsm
+detection:
+    selection:
+        Image:
+            - "sudo"
+            - "su"
+            - "pkexec"
+            - "doas"
+    filter:
+        TargetFilename:
+            - "/usr/bin/unix_chkpwd"
+            - "/sbin/unix_chkpwd"
+            - "/usr/sbin/unix_chkpwd"
+    condition: selection and not filter

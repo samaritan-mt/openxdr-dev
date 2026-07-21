@@ -1,0 +1,20 @@
+title: Detect shell launched with -c flag by non-root user
+id: bash_command_substitution
+logsource:
+    product: linux
+    category: process_creation
+detection:
+    selection:
+        TargetFilename:
+            - "/bin/bash"
+            - "/usr/bin/bash"
+            - "/bin/sh"
+            - "/usr/bin/sh"
+            - "/bin/dash"
+            - "/usr/bin/dash"
+            - "/bin/zsh"
+            - "/usr/bin/zsh"
+        CommandLine|contains: "-c"
+    filter:
+        User: "root"
+    condition: selection and not filter

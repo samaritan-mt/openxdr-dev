@@ -1,0 +1,15 @@
+title: Changes to SSH config
+id: config_file_tampering
+logsource:
+    product: linux
+    category: syscall
+detection:
+    selection:
+        Syscall:
+            - "open"
+            - "write"
+            - "openat"
+        TargetFilename:
+            - "/etc/ssh/sshd_config"
+            - "/etc/ssh/ssh_config"
+    condition: selection

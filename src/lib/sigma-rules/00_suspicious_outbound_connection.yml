@@ -1,0 +1,8 @@
+title: Detect outbound connection to suspicous IP
+logsource:
+    product: linux
+    category: network
+detection:
+    selection:
+        DestinationIp: "10.211.55.7"
+    condition: selection
