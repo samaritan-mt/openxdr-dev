@@ -5,3 +5,4 @@ cargo.lock
 .vscode/*
 .agent/*
 docs/*
+scratch/*
