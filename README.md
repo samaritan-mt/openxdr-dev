@@ -1,24 +1,28 @@
-# OpenXDR Agent - Implementation Plan & Status
+# OpenXDR Agent - eBPF Linux Security Agent
 
-**Goal**: Build a high-performance, tamper-resistant Linux security agent using eBPF for deep kernel visibility and Rust for safe, fast user-space processing.
+**Goal**: Build a high-performance, tamper-resistant Linux security agent using eBPF for deep kernel visibility and Rust for safe, fast user-space telemetry processing, native SigmaHQ rule evaluation, and advanced threat detection.
+
+---
 
 ## Project Status Dashboard
 
 | Component | Status | Description |
 |-----------|--------|-------------|
-| **Kernel Probes (eBPF)** | Stable | `execve`, `execveat`, and basic file monitoring implemented. |
-| **User-Space Agent** | In Progress | Event loop active, rule engine connected. Refinement needed. |
-| **Detection Engine** | In Progress | Basic rule matching works. Aggregation/Correlation pending. |
-| **Outputs & Integration** | Pending | JSON logs only. No remote transport or TLS yet. |
+| **Kernel Probes (eBPF)** | **Stable** | Includes `execve`, `execveat`, `openat`, `connect`, LSM (`bprm_check_security`), and kernel modules (`init_module`/`finit_module`). |
+| **Detection Engine** | **Stable** | Fully migrated to `null-sigma`. Evaluates live events against the official SigmaHQ corpus. |
+| **eBPF Rule Injection** | **Stable** | Parses Sigma `TargetFilename` & `Image` modifiers and loads up to 512 precise filters into kernel memory for fast-path exclusion. |
+| **User-Space Agent** | **Stable** | Asynchronous Tokio event multiplexer reading from 5 distinct BPF maps. Emits clean, structured JSON telemetry. |
+| **Outputs & Integration** | **In Progress** | Currently emits rich JSON to `stdout`. Architecture planning underway for Syslog or gRPC/HTTPS aggregation. |
+| **Static Scanning** | **Pending** | YARA integration for static file/memory scanning is planned. |
 
 ---
 
 ## Architecture & Workspace
 
 The project is organized as a Cargo workspace with the following members:
-- **`openxdr-agent`**: The main user-space application (Root).
-- **`openxdr-ebpf`** / **`agent-ebpf`**: The eBPF kernel probes (Kernel space).
-- **`openxdr-common`**: Shared types and definitions between kernel and user space.
+- **`openxdr-agent`**: The main user-space application (Root). Responsible for loading Sigma rules, unpacking BPF perf buffers, and emitting JSON telemetry.
+- **`openxdr-ebpf`** / **`agent-ebpf`**: The eBPF kernel probes (Kernel space). High-performance hooks written in constrained Rust to filter noise at the kernel boundary.
+- **`openxdr-common`**: Shared types and memory structures (`Event` variants) between kernel and user space.
 
 ---
 
@@ -27,32 +31,26 @@ The project is organized as a Cargo workspace with the following members:
 ### Phase 1: Foundation (Completed)
 - [x] **Project Setup**: Workspace configuration for `openxdr-common`, `agent-ebpf`, and `agent`.
 - [x] **Core Dependencies**: Aya (eBPF framework), Tokio (Async runtime), Serde.
-- [x] **Design**: Defined architecture for separate kernel/user processes.
+- [x] **Design**: Defined architecture for separate kernel/user memory boundaries.
 
-### Phase 2: Kernel Visibility (eBPF) (Active)
-- [x] **Process Execution**: 
-    - [x] `sys_enter_execve`: Capture Command, PID, UID.
-    - [x] `sys_enter_execveat`: Support different execution paths.
-    - [x] Filename Extraction: Robust user-space pointer reading.
-- [x] **File Integrity Monitoring (FIM)**:
-    - [x] Basic `open` syscall monitoring.
-    - [ ] Monitoring modification/write events (critical files like `/etc/passwd`).
-    - [ ] Path filtering optimization.
+### Phase 2: Kernel Visibility (eBPF) (Completed)
+- [x] **Process Execution**: `sys_enter_execve`, `sys_enter_execveat`. Extracts accurate, space-delimited `argv` strings and binary paths.
+- [x] **File Integrity Monitoring (FIM)**: `sys_enter_openat` for tracking sensitive file access/modifications (e.g., `/etc/passwd`).
+- [x] **Network Observability**: `sys_enter_connect` to trace outbound IPv4 connections natively.
+- [x] **LSM Probes**: `bprm_check_security` for privileged parent-child execution tracking.
+- [x] **Kernel Module Tracking**: `sys_enter_init_module` and `sys_enter_finit_module` to catch rootkit loading.
 
-### Phase 3: User-Space Agent & Detection (Active)
-- [x] **Event Loop**: Efficient async reading of `perf_event_array` with Tokio.
-- [x] **Rule Engine Integration**:
-    - [x] `rules.yaml` format design.
-    - [x] Loading and parsing rules.
-    - [x] In-memory matching against live eBPF events.
-- [ ] **Advanced Detection**:
-    - [ ] Aggregation/Time-window rules (e.g., "5 failed logins in 1 minute").
-    - [ ] Stateful detection.
+### Phase 3: User-Space Agent & Detection (Completed)
+- [x] **Event Loop**: Efficient async reading of `perf_event_array` buffers across all CPUs.
+- [x] **SigmaHQ Integration**: Native implementation of `null-sigma` supporting complex modifier parsing (`endswith`, `contains`).
+- [x] **eBPF Fast-Path**: Dynamically compiles Sigma blocks into an eBPF `RULES` map (capacity: 512 entries) to drop benign noise entirely inside the kernel.
+- [x] **Automated Validation**: `src/scratch/runtime_tester.sh` validates rules locally, generating live runtime coverage reports.
 
-### Phase 4: Outputs & Enterprise Features (Planned)
-- [ ] **Structured Logging**: JSON output to stdout/file (Partially done).
-- [ ] **Remote Transport**: TLS implementation for sending alerts to a backend.
-- [ ] **Self-Protection**: Prevent agent process termination.
+### Phase 4: Outputs & Enterprise Features (Active)
+- [x] **Structured Logging**: Clean, formatted JSON telemetry to standard output without C-string `\0` byte pollution.
+- [ ] **Remote Transport / Aggregation**: Planning stage for gRPC/HTTPS or Syslog TLS forwarding to a central console.
+- [ ] **YARA Static Scanning**: Integration for static payload evaluation on disk and in memory.
+- [ ] **Self-Protection**: Prevent agent process termination via advanced LSM hooks.
 
 ---
 
@@ -72,23 +70,29 @@ The project is organized as a Cargo workspace with the following members:
 ### Build & Run
 1.  **Build eBPF Probes**:
     ```bash
-    cargo xtask build-ebpf
+    cargo +nightly build -Z build-std=core --target bpfel-unknown-none --release -p openxdr-ebpf
     ```
-    *Note: If `xtask` is not set up, build directly via `cargo +nightly build -Z build-std=core --target bpfel-unknown-none --release -p openxdr-ebpf`*
 
 2.  **Build Userspace Agent**:
     ```bash
-    cargo build
+    cargo build --release
     ```
 
 3.  **Run (Root Required)**:
     ```bash
-    sudo ./target/debug/openxdr-agent
+    sudo ./target/release/openxdr-agent
     ```
+
+### Validation & Testing
+To verify Sigma rule matching against live kernel hooks, deploy the agent in one terminal and execute the tester in another:
+```bash
+./src/scratch/runtime_tester.sh
+```
 
 ---
 
 ## Latest Updates
-- **[Feature]**: Connected eBPF event stream to the rule engine.
-- **[Feature]**: Added basic File Integrity Monitoring (FIM) hooks.
-- **[Fix]**: Resolved `EVENTS` scope issues in eBPF probes.
+- **[Feature]**: Successfully integrated the `null-sigma` engine, ingesting 50+ official SigmaHQ rules.
+- **[Feature]**: Expanded the `RULES` map kernel capacity to 512, safely filtering complex `TargetFilename` permutations.
+- **[Feature]**: Added LSM, Module, and Network probes to capture lateral movement and suspicious outbound activity.
+- **[Fix]**: Stripped `\0` null-byte padding from JSON payloads, condensing `evt.argv` buffers into precise strings.
