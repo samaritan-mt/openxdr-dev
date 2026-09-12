@@ -4,5 +4,5 @@ logsource:
     category: network
 detection:
     selection:
-        DestinationIp: "10.211.55.7"
+        DestinationIp: "10.0.0.1"
     condition: selection

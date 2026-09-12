@@ -14,6 +14,12 @@ pub struct KernelRuleWrapper(openxdr_common::KernelRule);
 
 unsafe impl aya::Pod for KernelRuleWrapper {}
 
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+pub struct KernelRuleArrayWrapper(openxdr_common::KernelRuleArray);
+
+unsafe impl aya::Pod for KernelRuleArrayWrapper {}
+
 /**
  * EbpfKernel struct
  *
@@ -55,7 +61,6 @@ impl EbpfKernel {
      * @return: Result  
      */
     pub fn attach_execve(&mut self) -> anyhow::Result<()> {
-        // Attach execve
         let program: &mut TracePoint = self
             .bpf
             .program_mut("execve_enter")
@@ -79,14 +84,30 @@ impl EbpfKernel {
     }
 
     pub fn attach_file_monitoring(&mut self) -> anyhow::Result<()> {
-        let program_openat: &mut TracePoint = self
+        let program_open: &mut TracePoint = self
             .bpf
             .program_mut("open_enter")
+            .ok_or_else(|| anyhow::anyhow!("Program 'open_enter' not found"))?
+            .try_into()?;
+        program_open.load()?;
+        let link_result = program_open.attach("syscalls/sys_enter_open", "");
+        match link_result {
+            Ok(link_id) => {
+                self.links.insert("open_enter".into(), link_id);
+            }
+            Err(e) => {
+                println!("Notice: sys_enter_open not found (expected on modern ARM64/kernels 5.6+): {}", e);
+            }
+        }
+
+        let program_openat: &mut TracePoint = self
+            .bpf
+            .program_mut("openat_enter")
             .ok_or_else(|| anyhow::anyhow!("Program 'openat_enter' not found"))?
             .try_into()?;
         program_openat.load()?;
-        // attach to sys_enter_openat
-        let _ = program_openat.attach("syscalls/sys_enter_openat", "")?;
+        let link_id_at = program_openat.attach("syscalls/sys_enter_openat", "")?;
+        self.links.insert("openat_enter".into(), link_id_at);
 
         Ok(())
     }
@@ -185,17 +206,51 @@ impl EbpfKernel {
         Ok(())
     }
 
-    pub fn add_kernel_rules(&mut self, rules: &[openxdr_common::KernelRule]) -> anyhow::Result<()> {
+    /// Upload the compiled rule set as a single `Array` map value.
+    ///
+    /// `permissive_mask` carries the event types the kernel must forward
+    /// unconditionally; it is computed by the engine, which is the only place
+    /// that knows which Sigma constructs failed to lower.
+    pub fn add_kernel_rules(
+        &mut self,
+        rules: &[openxdr_common::KernelRule],
+        permissive_mask: u32,
+    ) -> anyhow::Result<()> {
+        if rules.len() > openxdr_common::MAX_KERNEL_RULES {
+            anyhow::bail!(
+                "engine produced {} kernel rules, budget is {}",
+                rules.len(),
+                openxdr_common::MAX_KERNEL_RULES
+            );
+        }
+
         let map = self
             .bpf
-            .map_mut("RULES")
-            .ok_or_else(|| anyhow::anyhow!("Map 'RULES' not found"))?;
-        let mut hash_map: aya::maps::HashMap<_, u32, KernelRuleWrapper> =
-            aya::maps::HashMap::try_from(map)?;
+            .map_mut("RULES_ARRAY")
+            .ok_or_else(|| anyhow::anyhow!("Map 'RULES_ARRAY' not found"))?;
+        let mut array_map: aya::maps::Array<_, KernelRuleArrayWrapper> =
+            aya::maps::Array::try_from(map)?;
 
-        for (i, rule) in rules.iter().enumerate() {
-            hash_map.insert(i as u32, KernelRuleWrapper(*rule), 0)?;
-        }
+        let mut block = openxdr_common::KernelRuleArray {
+            count: rules.len() as u32,
+            permissive_mask,
+            rules: [openxdr_common::KernelRule {
+                event_type: 0,
+                check_comm: 0,
+                comm_kind: 0,
+                comm_len: 0,
+                check_path: 0,
+                path_kind: 0,
+                path_len: 0,
+                _pad: 0,
+                comm: [0; 16],
+                path: [0; 64],
+            }; openxdr_common::MAX_KERNEL_RULES],
+        };
+
+        block.rules[..rules.len()].copy_from_slice(rules);
+
+        array_map.set(0, KernelRuleArrayWrapper(block), 0)?;
         Ok(())
     }
 }

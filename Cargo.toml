@@ -24,6 +24,7 @@ bytes = "1"
 anyhow = "1"
 regex = "1"
 null-sigma = { version = "0.1.3", features = ["json"] }
+syslog = "7.0.0"
 [target.'cfg(target_os = "linux")'.dependencies]
 aya = { workspace = true }
 agent-ebpf = { path = "src/agent-ebpf" }
@@ -39,7 +40,7 @@ serde = { version = "1", features = ["derive"] }
 anyhow = "1"
 bytes = "1"
 aya = { version = "0.13.1", features = ["async_tokio"] }
-aya-ebpf = "0.1.1"
+aya-ebpf = "0.2.1"
 aya-log-ebpf = "0.1.0"
 
 

@@ -10,9 +10,9 @@
 |-----------|--------|-------------|
 | **Kernel Probes (eBPF)** | **Stable** | Includes `execve`, `execveat`, `openat`, `connect`, LSM (`bprm_check_security`), and kernel modules (`init_module`/`finit_module`). |
 | **Detection Engine** | **Stable** | Fully migrated to `null-sigma`. Evaluates live events against the official SigmaHQ corpus. |
-| **eBPF Rule Injection** | **Stable** | Parses Sigma `TargetFilename` & `Image` modifiers and loads up to 512 precise filters into kernel memory for fast-path exclusion. |
+| **eBPF Rule Injection** | **Stable** | Lowers Sigma `Image`/`TargetFilename` selections into anchored kernel byte compares (`exact`/`startswith`/`endswith`), up to 128 rules in a single map lookup. Event types whose rules cannot be lowered are marked permissive and forwarded whole. |
 | **User-Space Agent** | **Stable** | Asynchronous Tokio event multiplexer reading from 5 distinct BPF maps. Emits clean, structured JSON telemetry. |
-| **Outputs & Integration** | **In Progress** | Currently emits rich JSON to `stdout`. Architecture planning underway for Syslog or gRPC/HTTPS aggregation. |
+| **Outputs & Integration** | **In Progress** | Emits rich JSON to `stdout` and to Syslog (`LOG_USER`, severity-mapped) over a single persistent connection. gRPC/HTTPS aggregation still at planning stage. |
 | **Static Scanning** | **Pending** | YARA integration for static file/memory scanning is planned. |
 
 ---
@@ -43,11 +43,12 @@ The project is organized as a Cargo workspace with the following members:
 ### Phase 3: User-Space Agent & Detection (Completed)
 - [x] **Event Loop**: Efficient async reading of `perf_event_array` buffers across all CPUs.
 - [x] **SigmaHQ Integration**: Native implementation of `null-sigma` supporting complex modifier parsing (`endswith`, `contains`).
-- [x] **eBPF Fast-Path**: Dynamically compiles Sigma blocks into an eBPF `RULES` map (capacity: 512 entries) to drop benign noise entirely inside the kernel.
+- [x] **eBPF Fast-Path**: Compiles Sigma selections into an eBPF `RULES_ARRAY` map (one lookup, 128-rule budget) to drop benign noise inside the kernel. See `docs/kernel_fastpath_pushdown.md` for the superset correctness contract.
 - [x] **Automated Validation**: `src/scratch/runtime_tester.sh` validates rules locally, generating live runtime coverage reports.
 
 ### Phase 4: Outputs & Enterprise Features (Active)
 - [x] **Structured Logging**: Clean, formatted JSON telemetry to standard output without C-string `\0` byte pollution.
+- [x] **Syslog Output**: Severity-mapped `LOG_USER` emission over one reused connection, reconnecting on socket loss.
 - [ ] **Remote Transport / Aggregation**: Planning stage for gRPC/HTTPS or Syslog TLS forwarding to a central console.
 - [ ] **YARA Static Scanning**: Integration for static payload evaluation on disk and in memory.
 - [ ] **Self-Protection**: Prevent agent process termination via advanced LSM hooks.
@@ -93,6 +94,12 @@ To verify Sigma rule matching against live kernel hooks, deploy the agent in one
 
 ## Latest Updates
 - **[Feature]**: Successfully integrated the `null-sigma` engine, ingesting 50+ official SigmaHQ rules.
-- **[Feature]**: Expanded the `RULES` map kernel capacity to 512, safely filtering complex `TargetFilename` permutations.
 - **[Feature]**: Added LSM, Module, and Network probes to capture lateral movement and suspicious outbound activity.
+- **[Feature]**: Syslog output alongside stdout, on a connection opened once and reused.
+- **[Feature]**: `Engine::report_kernel_filter()` prints, at startup, which event types the kernel filters and which are forwarded wholesale — and names the rule responsible.
+- **[Fix]**: Kernel rule matching is now **anchored**. Sigma `endswith`/`startswith` lower to real suffix/prefix compares instead of having their wildcards stripped, which had silently turned every `Image|endswith` rule into a prefix match that could not fire.
+- **[Fix]**: Replaced the undocumented blanket fail-open at 128 rules with an explicit per-event-type permissive mask.
+- **[Fix]**: The `RULES` HashMap became a single `RULES_ARRAY` lookup, removing up to 512 `bpf_map_lookup_elem` calls per syscall.
 - **[Fix]**: Stripped `\0` null-byte padding from JSON payloads, condensing `evt.argv` buffers into precise strings.
+
+> **Build note**: the eBPF object must be compiled and verifier-checked on Linux. The kernel crates do not build on macOS (`aya` and `bpf-linker` are Linux-only), so a macOS `cargo test` exercises the userspace engine and the shared matcher only.

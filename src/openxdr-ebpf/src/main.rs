@@ -9,12 +9,15 @@ use aya_ebpf::{
         bpf_probe_read_kernel_str_bytes, bpf_probe_read_user, bpf_probe_read_user_str_bytes,
     },
     macros::{lsm, map, tracepoint},
-    maps::{PerCpuArray, PerfEventArray, HashMap},
+    maps::{PerCpuArray, PerfEventArray, Array},
     programs::TracePointContext,
     EbpfContext,
 };
 
-use openxdr_common::{ExecveEvent, FileEvent, LSMEvent, ModuleEvent, KernelRule, NetworkEvent};
+use openxdr_common::{
+    pattern_matches, ExecveEvent, FileEvent, KernelRuleArray, LSMEvent, ModuleEvent, NetworkEvent,
+    MAX_KERNEL_RULES,
+};
 
 #[map]
 static EVENTS: PerfEventArray<ExecveEvent> = PerfEventArray::new(0);
@@ -32,54 +35,94 @@ static EVENTS_MODULE: PerfEventArray<ModuleEvent> = PerfEventArray::new(0);
 static EVENTS_NET: PerfEventArray<NetworkEvent> = PerfEventArray::new(0);
 
 #[map]
-static RULES: HashMap<u32, KernelRule> = HashMap::with_max_entries(512, 0);
+static RULES_ARRAY: Array<KernelRuleArray> = Array::with_max_entries(1, 0);
 
 #[map]
 static SCRATCH: PerCpuArray<[u8; 4096]> = PerCpuArray::with_max_entries(1, 0);
 
+/// Kernel-side rule pre-filter: does *any* loaded rule want this event?
+///
+/// Returns `true` to forward the event to userspace. The contract is
+/// deliberately asymmetric -- every uncertain case returns `true`, because a
+/// dropped event is a missed detection while an extra event only costs CPU.
 #[inline(always)]
-fn passes_kernel_filter(event_type: u8, comm: &[u8; 16], path: &[u8; 512]) -> bool {
-    let rule0 = unsafe { RULES.get(&0) };
-    if rule0.is_none() {
-        return true; // fail-open if no rules loaded
+fn passes_kernel_filter<const N: usize>(event_type: u8, comm: &[u8; 16], path: &[u8; N]) -> bool {
+    debug_assert!(N.is_power_of_two());
+
+    let Some(block) = RULES_ARRAY.get(0) else {
+        // Map not populated yet (agent still starting): forward everything.
+        return true;
+    };
+
+    // Userspace told us this event type cannot be filtered correctly.
+    if block.permissive_mask & (1u32 << (event_type & 31)) != 0 {
+        return true;
     }
-    
-    for i in 0..512 {
-        if let Some(rule) = unsafe { RULES.get(&i) } {
-            if rule.event_type != event_type && rule.event_type != 0 {
-                continue;
-            }
-            
-            let mut matches = true;
-            
-            if rule.check_comm == 1 {
-                for j in 0..16 {
-                    if comm[j] != rule.comm[j] {
-                        matches = false;
-                        break;
-                    }
-                    if comm[j] == 0 { break; }
-                }
-            }
-            
-            if matches && rule.check_path == 1 {
-                for j in 0..64 {
-                    if rule.path[j] == 0 { break; } 
-                    if path[j] != rule.path[j] {
-                        matches = false;
-                        break;
-                    }
-                }
-            }
-            
-            if matches {
-                return true;
-            }
-        } else {
-            break; // missing index means no more rules
+
+    let count = block.count as usize;
+    if count == 0 {
+        return true;
+    }
+    let limit = if count > MAX_KERNEL_RULES {
+        MAX_KERNEL_RULES
+    } else {
+        count
+    };
+
+    // Measure both haystacks once, outside the rule loop. Doing this per rule
+    // would multiply the scan cost by the rule count.
+    let mut comm_len = 0usize;
+    for i in 0..16 {
+        if comm[i] == 0 {
+            break;
         }
+        comm_len = i + 1;
     }
-    
+    let mut path_len = 0usize;
+    for i in 0..N {
+        if path[i] == 0 {
+            break;
+        }
+        path_len = i + 1;
+    }
+
+    for i in 0..MAX_KERNEL_RULES {
+        if i >= limit {
+            break;
+        }
+        let rule = &block.rules[i];
+
+        if rule.event_type != event_type && rule.event_type != 0 {
+            continue;
+        }
+
+        if rule.check_comm == 1
+            && !pattern_matches(
+                comm,
+                comm_len,
+                &rule.comm,
+                rule.comm_len as usize,
+                rule.comm_kind,
+            )
+        {
+            continue;
+        }
+
+        if rule.check_path == 1
+            && !pattern_matches(
+                path,
+                path_len,
+                &rule.path,
+                rule.path_len as usize,
+                rule.path_kind,
+            )
+        {
+            continue;
+        }
+
+        return true;
+    }
+
     false
 }
 
@@ -212,64 +255,31 @@ fn try_execve_enter(ctx: TracePointContext, filename_offset: usize) -> Result<u3
                 }
                 _ => {}
             }
-
             // Explicit fixed reads for argv[0] to argv[7]
             // Fixed-section layout: each arg occupies exactly 128 bytes.
             // This is extremely verifier-friendly and prevents state explosion.
-            if let Ok(arg_ptr) = bpf_probe_read_user::<u64>((args_ptr) as *const u64) {
-                if arg_ptr != 0 {
+            for i in 0..8 {
+                if let Ok(arg_ptr) = bpf_probe_read_user::<u64>((args_ptr + (i * 8)) as *const u64) {
+                    if arg_ptr == 0 {
+                        break; // NULL pointer terminates argv, avoid reading envp
+                    }
                     event.argc += 1;
-                    let _ = bpf_probe_read_user_str_bytes(arg_ptr as *const u8, &mut event.argv[0..128]);
-                    event.argv[127] = 0; // force null termination
-                }
-            }
-            if let Ok(arg_ptr) = bpf_probe_read_user::<u64>((args_ptr + 8) as *const u64) {
-                if arg_ptr != 0 {
-                    event.argc += 1;
-                    let _ = bpf_probe_read_user_str_bytes(arg_ptr as *const u8, &mut event.argv[128..256]);
-                    event.argv[255] = 0;
-                }
-            }
-            if let Ok(arg_ptr) = bpf_probe_read_user::<u64>((args_ptr + 16) as *const u64) {
-                if arg_ptr != 0 {
-                    event.argc += 1;
-                    let _ = bpf_probe_read_user_str_bytes(arg_ptr as *const u8, &mut event.argv[256..384]);
-                    event.argv[383] = 0;
-                }
-            }
-            if let Ok(arg_ptr) = bpf_probe_read_user::<u64>((args_ptr + 24) as *const u64) {
-                if arg_ptr != 0 {
-                    event.argc += 1;
-                    let _ = bpf_probe_read_user_str_bytes(arg_ptr as *const u8, &mut event.argv[384..512]);
-                    event.argv[511] = 0;
-                }
-            }
-            if let Ok(arg_ptr) = bpf_probe_read_user::<u64>((args_ptr + 32) as *const u64) {
-                if arg_ptr != 0 {
-                    event.argc += 1;
-                    let _ = bpf_probe_read_user_str_bytes(arg_ptr as *const u8, &mut event.argv[512..640]);
-                    event.argv[639] = 0;
-                }
-            }
-            if let Ok(arg_ptr) = bpf_probe_read_user::<u64>((args_ptr + 40) as *const u64) {
-                if arg_ptr != 0 {
-                    event.argc += 1;
-                    let _ = bpf_probe_read_user_str_bytes(arg_ptr as *const u8, &mut event.argv[640..768]);
-                    event.argv[767] = 0;
-                }
-            }
-            if let Ok(arg_ptr) = bpf_probe_read_user::<u64>((args_ptr + 48) as *const u64) {
-                if arg_ptr != 0 {
-                    event.argc += 1;
-                    let _ = bpf_probe_read_user_str_bytes(arg_ptr as *const u8, &mut event.argv[768..896]);
-                    event.argv[895] = 0;
-                }
-            }
-            if let Ok(arg_ptr) = bpf_probe_read_user::<u64>((args_ptr + 56) as *const u64) {
-                if arg_ptr != 0 {
-                    event.argc += 1;
-                    let _ = bpf_probe_read_user_str_bytes(arg_ptr as *const u8, &mut event.argv[896..1024]);
-                    event.argv[1023] = 0;
+                    let start = (i as usize) * 128;
+                    let end = start + 128;
+                    match bpf_probe_read_user_str_bytes(arg_ptr as *const u8, &mut event.argv[start..end]) {
+                        Ok(slice) => {
+                            let len = slice.len();
+                            if len > 0 && len <= 128 {
+                                event.argv[start + len - 1] = 0;
+                            } else {
+                                event.argv[start] = 0;
+                            }
+                        }
+                        Err(_) => { event.argv[start] = 0; }
+                    }
+                    event.argv[end - 1] = 0; // force null termination
+                } else {
+                    break;
                 }
             }
         }
@@ -301,14 +311,12 @@ fn try_execve_enter(ctx: TracePointContext, filename_offset: usize) -> Result<u3
 
 #[tracepoint]
 pub fn open_enter(ctx: TracePointContext) -> u32 {
-    // filename @ 16, flags @ 24
     let _ = try_file_open(ctx, 24, 32);
     0
 }
 
 #[tracepoint]
 pub fn openat_enter(ctx: TracePointContext) -> u32 {
-    // dfd @ 16, filename @ 24, flags @ 32
     let _ = try_file_open(ctx, 24, 32);
     0
 }
@@ -326,24 +334,22 @@ fn try_file_open(
 
     let flags: u64 = unsafe { ctx.read_at(flags_offset).unwrap_or(0) };
 
-    // Minimal filter to reduce noise (don't trace pure reads):
-    // Check if lower bits are non-zero (WRONLY=1, RDWR=2) or other flags.
-    let is_write = (flags & 0b11) != 0
-        || (flags & 0o100) != 0
-        || (flags & 0o1000) != 0
-        || (flags & 0o2000) != 0;
+    // For FIM logic, we no longer drop pure reads. 
+    // Wait, to avoid spam, we ONLY want to trace it if it matches our RULES.
+    // We will do the matching AFTER we extract the filename!
 
-    if !is_write {
-        return Ok(0);
-    }
-
-    let mut event = FileEvent {
-        path: [0; 128],
-        flags: flags as u32,
-        pid,
-        uid,
-        comm: [0; 16],
+    // Allocate the event in the scratch map to avoid 512-byte stack limit!
+    let buf_ptr = match SCRATCH.get_ptr_mut(0) {
+        Some(ptr) => ptr,
+        None => return Err(0),
     };
+    let event = unsafe { &mut *(buf_ptr as *mut FileEvent) };
+
+    event.path = [0; 128];
+    event.flags = flags as u32;
+    event.pid = pid;
+    event.uid = uid;
+    event.comm = [0; 16];
 
     if let Ok(comm) = ctx.command() {
         let len = comm.len().min(16);
@@ -369,7 +375,21 @@ fn try_file_open(
         }
     }
 
-    EVENTS_FILE.output(&ctx, &event, 0);
+    // Now check if it passes the kernel filter
+    // If it's a read (not a write) AND it doesn't match a rule, we drop it to avoid spam.
+    let is_write = (flags & 0b11) != 0
+        || (flags & 0o100) != 0
+        || (flags & 0o1000) != 0
+        || (flags & 0o2000) != 0;
+
+    if !passes_kernel_filter(2, &event.comm, &event.path) {
+        if !is_write {
+            // Drop pure reads that do not explicitly match a FIM rule
+            return Ok(0);
+        }
+    }
+
+    EVENTS_FILE.output(&ctx, event, 0);
     Ok(0)
 }
 
@@ -381,6 +401,7 @@ pub fn bprm_check(ctx: LsmContext) -> i32 {
     }
 }
 
+#[inline(always)]
 fn try_bprm_check(_ctx: LsmContext) -> Result<i32, i32> {
 
     let buf_ptr = match SCRATCH.get_ptr_mut(0) {
@@ -464,6 +485,20 @@ pub struct sockaddr_in {
     pub sin_zero: [u8; 8],
 }
 
+#[repr(C)]
+pub struct in6_addr {
+    pub in6_u: [u8; 16],
+}
+
+#[repr(C)]
+pub struct sockaddr_in6 {
+    pub sin6_family: u16,
+    pub sin6_port: u16,
+    pub sin6_flowinfo: u32,
+    pub sin6_addr: in6_addr,
+    pub sin6_scope_id: u32,
+}
+
 #[tracepoint]
 pub fn connect_enter(ctx: TracePointContext) -> i32 {
     match try_connect_enter(ctx) {
@@ -472,6 +507,7 @@ pub fn connect_enter(ctx: TracePointContext) -> i32 {
     }
 }
 
+#[inline(always)]
 fn try_connect_enter(ctx: TracePointContext) -> Result<i32, i32> {
     // Arg 0 (sockfd) is at offset 16, Arg 1 (addr ptr) is at offset 24
     let fd: i32 = unsafe { ctx.read_at::<u64>(16).unwrap_or(0) as i32 };
@@ -482,15 +518,9 @@ fn try_connect_enter(ctx: TracePointContext) -> Result<i32, i32> {
         Err(_) => return Ok(0),
     };
 
-    if sa.sa_family != 2 { // AF_INET
+    if sa.sa_family != 2 && sa.sa_family != 10 { // AF_INET or AF_INET6
         return Ok(0);
     }
-
-    // Now read it as a sockaddr_in
-    let sin = match unsafe { bpf_probe_read_user(uservaddr as *const sockaddr_in) } {
-        Ok(sin) => sin,
-        Err(_) => return Ok(0),
-    };
 
     // Allocate the event
     let buf_ptr = match SCRATCH.get_ptr_mut(0) {
@@ -512,9 +542,26 @@ fn try_connect_enter(ctx: TracePointContext) -> Result<i32, i32> {
     }
 
     event.fd = fd;
-    // Extract IP and Port (Note: they are in network byte order!)
-    event.daddr = sin.sin_addr.s_addr;
-    event.dport = sin.sin_port;
+    event.daddr = [0; 16];
+
+    if sa.sa_family == 2 {
+        let sin = match unsafe { bpf_probe_read_user(uservaddr as *const sockaddr_in) } {
+            Ok(sin) => sin,
+            Err(_) => return Ok(0),
+        };
+        event.is_ipv6 = 0;
+        event.dport = sin.sin_port;
+        let ipv4_bytes = sin.sin_addr.s_addr.to_ne_bytes();
+        event.daddr[..4].copy_from_slice(&ipv4_bytes);
+    } else {
+        let sin6 = match unsafe { bpf_probe_read_user(uservaddr as *const sockaddr_in6) } {
+            Ok(sin6) => sin6,
+            Err(_) => return Ok(0),
+        };
+        event.is_ipv6 = 1;
+        event.dport = sin6.sin6_port;
+        event.daddr.copy_from_slice(&sin6.sin6_addr.in6_u);
+    }
 
     EVENTS_NET.output(&ctx, event, 0);
     Ok(0)
