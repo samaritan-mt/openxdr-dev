@@ -199,7 +199,7 @@ fn try_execve_enter(ctx: TracePointContext, filename_offset: usize) -> Result<u3
         Some(ptr) => ptr,
         None => {
             unsafe {
-                let _ = bpf_printk!(b"ERROR: SCRATCH lookup failed\0");
+                let _ = bpf_printk!(c"ERROR: SCRATCH lookup failed");
             }
             return Err(0);
         }
@@ -217,7 +217,7 @@ fn try_execve_enter(ctx: TracePointContext, filename_offset: usize) -> Result<u3
 
     unsafe {
         let _ = bpf_printk!(
-            b"exec entry: pid %u uid %u\0",
+            c"exec entry: pid %u uid %u",
             event.pid as u64,
             event.uid as u64
         );
@@ -358,7 +358,7 @@ fn try_file_open(
 
     unsafe {
         let filename_ptr: u64 = ctx.read_at(filename_offset).unwrap_or(0);
-        //let _ = bpf_printk!(b"File name pointer hex: 0x%lx\0", filename_ptr);
+        //let _ = bpf_printk!(c"File name pointer hex: 0x%lx", filename_ptr);
         if filename_ptr != 0 {
             // Try reading filename
             let msb_set = (filename_ptr & (1 << 63)) != 0;

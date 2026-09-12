@@ -6,3 +6,4 @@ cargo.lock
 .agent/*
 docs/*
 src/scratch/*
+.claude/*
