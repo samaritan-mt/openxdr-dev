@@ -16,7 +16,7 @@ use aya_ebpf::{
 
 use openxdr_common::{
     pattern_matches, ExecveEvent, FileEvent, KernelRuleArray, LSMEvent, ModuleEvent, NetworkEvent,
-    MAX_KERNEL_RULES,
+    MAX_KERNEL_RULES, SyscallByteOffsets
 };
 
 #[map]

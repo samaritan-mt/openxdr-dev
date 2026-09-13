@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use pnet::datalink;
 use crate::agent::Error;
+
 /**
  * Configuration for the Agent.
  * rules_path - Path to the rules file
@@ -155,6 +156,7 @@ impl Config {
             .clone()
             .unwrap_or_else(|| "unknown-release".to_string())
     }
+
 }
 /**
  * Convert the global configuration to a formatted string.

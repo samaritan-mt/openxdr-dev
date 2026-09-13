@@ -2,6 +2,27 @@
 pub const EXECVE_ARGV_BUF_SIZE: usize = 1024;
 pub const EXECVE_MAX_ARGS: usize = 12;
 
+
+// Struct to define offset positions for each of the possible syscalls in different arch
+pub const fn sys_arg(n: usize) -> usize { 16 + 8 * n }
+
+pub mod SyscallByteOffsets {
+    use super::sys_arg;
+    // open(filename, flags, mode)
+    pub const OPEN_FILENAME:     usize = sys_arg(0);
+    pub const OPEN_FLAGS:        usize = sys_arg(1);
+    // openat(dfd, filename, flags, mode)
+    pub const OPENAT_FILENAME:   usize = sys_arg(1);
+    pub const OPENAT_FLAGS:      usize = sys_arg(2);
+    // execve(filename, argv, envp)
+    pub const EXECVE_FILENAME:   usize = sys_arg(0);
+    // execveat(fd, filename, argv, envp, flags)
+    pub const EXECVEAT_FILENAME: usize = sys_arg(1);
+    // connect(fd, uservaddr, addrlen)
+    pub const CONNECT_FD:        usize = sys_arg(0);
+    pub const CONNECT_ADDR:      usize = sys_arg(1);
+}
+
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct ExecveEvent {
