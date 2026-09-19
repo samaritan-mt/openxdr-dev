@@ -1,4 +1,6 @@
-use openxdr_common::{KernelRule, MATCH_EXACT, MATCH_PREFIX, MATCH_SUFFIX, MAX_KERNEL_RULES};
+use openxdr_common::{
+    KernelRule, MATCH_EXACT, MATCH_PREFIX, MATCH_SUFFIX, MAX_KERNEL_RULES, MAX_PATTERN_LEN,
+};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fs;
@@ -148,9 +150,20 @@ impl Engine {
             }
         }
 
-        // Overflow is the last way the fast-path can lie. Rather than silently
-        // truncating the rule set -- which would drop events no remaining rule
-        // claims -- fail the affected types open.
+        // Order matters here. Drop rules belonging to already-permissive types
+        // FIRST, then measure what is left against the budget.
+        //
+        // Doing it the other way round lets doomed rules consume budget and
+        // evict live ones: a process_creation rule set that is on its way to
+        // permissive (because some later file uses `Image|contains`) still has
+        // its terms pushed, and if those land past the cap they push a
+        // perfectly good FILE or LSM rule out. That is a silent loss of
+        // filtering for a type that had nothing wrong with it.
+        kernel_rules.retain(|kr| permissive_mask & (1 << kr.event_type) == 0);
+
+        // Whatever still overflows genuinely does not fit. Fail those types
+        // open rather than truncating, which would drop events no remaining
+        // rule claims.
         if kernel_rules.len() > MAX_KERNEL_RULES {
             let mut kept: Vec<KernelRule> = Vec::with_capacity(MAX_KERNEL_RULES);
             for kr in &kernel_rules {
@@ -167,11 +180,9 @@ impl Engine {
                 }
             }
             kernel_rules = kept;
+            // A type that just went permissive must not keep its now-dead rules.
+            kernel_rules.retain(|kr| permissive_mask & (1 << kr.event_type) == 0);
         }
-
-        // A rule whose type went permissive after it was pushed is dead weight
-        // in the kernel loop: drop it so the budget goes to types we do filter.
-        kernel_rules.retain(|kr| permissive_mask & (1 << kr.event_type) == 0);
 
         Self {
             sigma_engine,
@@ -519,7 +530,7 @@ fn lower_term(event_type: u8, slot: Slot, term: &Term) -> Option<KernelRule> {
         path_len: 0,
         _pad: 0,
         comm: [0; 16],
-        path: [0; 64],
+        path: [0; MAX_PATTERN_LEN],
     };
 
     // Truncating a pattern would widen it for prefix and *change* it for
@@ -535,7 +546,7 @@ fn lower_term(event_type: u8, slot: Slot, term: &Term) -> Option<KernelRule> {
             kr.comm[..bytes.len()].copy_from_slice(bytes);
         }
         Slot::Path => {
-            if bytes.len() > 64 {
+            if bytes.len() > MAX_PATTERN_LEN {
                 return None;
             }
             kr.check_path = 1;
@@ -677,6 +688,29 @@ mod tests {
     }
 
     #[test]
+    fn a_doomed_types_rules_cannot_evict_a_healthy_types_rules() {
+        // Regression: the budget check used to run BEFORE dead rules were
+        // dropped. process_creation terms are pushed as files are read, and
+        // only later does an `Image|contains` rule turn that whole type
+        // permissive -- so its doomed rules sat in the list consuming budget.
+        // With MAX_KERNEL_RULES at 32 they overflowed the cap and evicted
+        // FILE's rules, silently disabling a fast path that was perfectly
+        // healthy. Symptom was "event type 2 overflowed the budget" with only
+        // 11 rules actually loaded.
+        let engine = Engine::new("src/lib/sigma-rules");
+        let rules = engine.compile_kernel_rules();
+        let mask = engine.permissive_mask();
+
+        let file_rules = rules.iter().filter(|r| r.event_type == ET_FILE).count();
+        assert!(
+            mask & (1 << ET_FILE) == 0,
+            "FILE went permissive; another type's discarded rules likely ate the budget"
+        );
+        assert!(file_rules > 0, "FILE should retain its TargetFilename rules");
+        assert!(rules.len() <= MAX_KERNEL_RULES);
+    }
+
+    #[test]
     fn permissive_types_carry_no_dead_kernel_rules() {
         let engine = Engine::new("src/lib/sigma-rules");
         let mask = engine.permissive_mask();
@@ -691,4 +725,7 @@ mod tests {
         assert!(engine.compile_kernel_rules().len() <= MAX_KERNEL_RULES);
     }
 }
+
+
+
 

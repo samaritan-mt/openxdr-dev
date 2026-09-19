@@ -79,7 +79,26 @@ pub struct NetworkEvent {
 /// so 128 rules is roughly 10k verified instructions per syscall. Userspace and
 /// kernel MUST agree on this value -- see `KernelRuleArray::permissive_mask`
 /// for what happens when the rule set does not fit.
-pub const MAX_KERNEL_RULES: usize = 128;
+pub const MAX_KERNEL_RULES: usize = 32;
+
+/// Maximum byte length of a lowered pattern, and the loop bound the verifier
+/// reasons about in `pattern_matches`.
+///
+/// This is a *verifier* budget, not a storage decision. The bound appears in
+/// the inner compare loop, so every byte of width is paid for in states
+/// explored, per rule. Measured 2026-09-19, the longest pattern the Sigma
+/// corpus lowers is 19 bytes (`/TeamViewer_Service`), so 32 leaves headroom
+/// while halving what 64 cost. Longer patterns are refused by `lower_term()`
+/// and turn their event type permissive.
+pub const MAX_PATTERN_LEN: usize = 32;
+
+/// Upper bound on the NUL scan used to measure an event path.
+///
+/// The measured length feeds every suffix offset, so the verifier carries it
+/// as a scalar range and pays for the *bound*, not the data. Paths longer than
+/// this are forwarded to userspace unmeasured rather than mis-measured --
+/// failing open, which the superset invariant permits.
+pub const MAX_PATH_SCAN: usize = 256;
 
 /// How a `KernelRule` byte pattern is compared against an event field.
 ///
@@ -109,7 +128,7 @@ pub struct KernelRule {
     pub path_len: u8,  // pattern length, required for suffix compares
     pub _pad: u8,
     pub comm: [u8; 16],
-    pub path: [u8; 64],
+    pub path: [u8; MAX_PATTERN_LEN],
 }
 
 /// The whole rule set, transferred as one `Array` map value so the kernel needs
@@ -141,39 +160,74 @@ pub fn pattern_matches<const N: usize>(
     pat_len: usize,
     kind: u8,
 ) -> bool {
-    if pat_len == 0 || pat_len > pat.len() {
+    if pat_len == 0 || pat_len > pat.len() || pat_len > hay_len {
         return false;
     }
 
-    // Offset of the first haystack byte to compare.
-    let start = match kind {
-        MATCH_SUFFIX => {
-            if pat_len > hay_len {
-                return false;
-            }
-            hay_len - pat_len
+    // The `kind` branch is taken ONCE per rule, not once per byte. That
+    // separation is the whole point of this shape.
+    //
+    // `kind` comes from map data, so the verifier cannot know it is
+    // MATCH_EXACT even when every loaded rule is. If the comparison index were
+    // computed from `kind` inside the loop, the verifier would have to carry
+    // the suffix case's dynamic offset -- a scalar *range*, since it derives
+    // from `hay_len` -- through every byte of every rule. That is what blew the
+    // 1M instruction budget: `r1 &= 511` with `R7=scalar(smin=22,smax=51)` and
+    // 30k+ scalar ids minted. See docs/verifier_complexity_budget.md.
+    if kind == MATCH_SUFFIX {
+        suffix_matches(hay, hay_len, pat, pat_len)
+    } else {
+        // MATCH_EXACT additionally pins the length; MATCH_PREFIX and any
+        // unrecognised kind degrade to a prefix compare, which is a superset
+        // of exact and therefore never a miss.
+        if kind == MATCH_EXACT && pat_len != hay_len {
+            return false;
         }
-        MATCH_EXACT => {
-            if pat_len != hay_len {
-                return false;
-            }
-            0
-        }
-        // MATCH_PREFIX and anything unrecognised degrade to a prefix compare,
-        // which is a superset of exact -- never a miss.
-        _ => {
-            if pat_len > hay_len {
-                return false;
-            }
-            0
-        }
-    };
+        prefix_matches(hay, pat, pat_len)
+    }
+}
 
-    for j in 0..64 {
+/// Anchored-at-zero compare. The index is a plain loop counter bounded by a
+/// constant, so the verifier tracks it as a scalar with a known range and the
+/// access folds to a simple bounded array read -- no mask, no arithmetic on a
+/// runtime value. This is the cheap path, and today every rule the corpus
+/// lowers into the kernel takes it.
+#[inline(always)]
+fn prefix_matches<const N: usize>(hay: &[u8; N], pat: &[u8], pat_len: usize) -> bool {
+    for j in 0..MAX_PATTERN_LEN {
+        // Both bounds are compile-time constants against a loop counter.
+        if j >= pat_len || j >= N {
+            break;
+        }
+        if hay[j] != pat[j] {
+            return false;
+        }
+    }
+    true
+}
+
+/// Anchored-at-end compare. `start` derives from `hay_len`, so the index is a
+/// runtime scalar and must be masked to stay provably in range -- which is
+/// only sound because every haystack buffer is a power of two (512 execve/LSM,
+/// 128 openat, 16 comm).
+///
+/// This is the expensive path. When suffix rules do start reaching the kernel
+/// and this shows up in a verifier budget, the fix is to reverse the haystack
+/// into scratch once per event and store patterns pre-reversed at lowering
+/// time, turning every suffix compare back into `prefix_matches`.
+#[inline(always)]
+fn suffix_matches<const N: usize>(
+    hay: &[u8; N],
+    hay_len: usize,
+    pat: &[u8],
+    pat_len: usize,
+) -> bool {
+    debug_assert!(N.is_power_of_two());
+    let start = hay_len - pat_len; // pat_len <= hay_len checked by the caller
+    for j in 0..MAX_PATTERN_LEN {
         if j >= pat_len {
             break;
         }
-        // Masking keeps the index provably inside `hay` for the verifier.
         let idx = (start + j) & (N - 1);
         if hay[idx] != pat[j] {
             return false;
@@ -192,8 +246,8 @@ mod tests {
         b
     }
 
-    fn pat(s: &str) -> [u8; 64] {
-        let mut b = [0u8; 64];
+    fn pat(s: &str) -> [u8; MAX_PATTERN_LEN] {
+        let mut b = [0u8; MAX_PATTERN_LEN];
         b[..s.len()].copy_from_slice(s.as_bytes());
         b
     }
@@ -257,10 +311,53 @@ mod tests {
     }
 
     #[test]
+    fn a_pattern_longer_than_the_haystack_buffer_cannot_overread() {
+        // comm is 16 bytes but MAX_PATTERN_LEN is 32. The `j >= N` guard in
+        // prefix_matches is the only thing stopping a 32-byte pattern walking
+        // off the end of a [u8; 16]. Exercise it directly.
+        let comm: [u8; 16] = hay("nginx");
+        let long = pat("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); // exactly 32
+        assert!(!pattern_matches(&comm, 5, &long, 32, MATCH_PREFIX));
+        assert!(!pattern_matches(&comm, 5, &long, 32, MATCH_EXACT));
+        assert!(!pattern_matches(&comm, 5, &long, 32, MATCH_SUFFIX));
+    }
+
+    #[test]
+    fn a_full_width_pattern_still_matches() {
+        // MAX_PATTERN_LEN is the loop bound; an exactly-32-byte pattern must
+        // not be silently truncated to 31 by an off-by-one in the guard.
+        let s32 = "/usr/local/lib/systemd/aaaaaaaaa"; // 32 chars
+        assert_eq!(s32.len(), MAX_PATTERN_LEN);
+        let buf: [u8; 512] = hay(s32);
+        assert!(pattern_matches(&buf, 32, &pat(s32), 32, MATCH_EXACT));
+        assert!(pattern_matches(&buf, 32, &pat(s32), 32, MATCH_PREFIX));
+        assert!(pattern_matches(&buf, 32, &pat(s32), 32, MATCH_SUFFIX));
+    }
+
+    #[test]
+    fn pattern_longer_than_haystack_is_rejected_for_every_kind() {
+        // The length guard was hoisted out of the per-kind arms into one
+        // up-front check; confirm all three kinds still reject.
+        let buf: [u8; 512] = hay("/nc");
+        for kind in [MATCH_EXACT, MATCH_PREFIX, MATCH_SUFFIX] {
+            assert!(!pattern_matches(&buf, 3, &pat("/usr/bin/netcat"), 15, kind));
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_kind_degrades_to_prefix_never_to_a_match_all() {
+        // kind is map data and could be anything. It must degrade to prefix
+        // (a superset of exact, so never a miss) and must not match blindly.
+        let buf: [u8; 512] = hay("/usr/bin/curl");
+        assert!(pattern_matches(&buf, 13, &pat("/usr"), 4, 99));
+        assert!(!pattern_matches(&buf, 13, &pat("/bin"), 4, 99));
+    }
+
+    #[test]
     fn abi_layout_has_no_padding_holes() {
         // aya::Pod requires the struct be safely transmutable to bytes; any
         // uninitialised padding would leak kernel stack into the map.
-        assert_eq!(core::mem::size_of::<KernelRule>(), 8 + 16 + 64);
+        assert_eq!(core::mem::size_of::<KernelRule>(), 8 + 16 + MAX_PATTERN_LEN);
         assert_eq!(core::mem::align_of::<KernelRule>(), 1);
         assert_eq!(
             core::mem::size_of::<KernelRuleArray>(),

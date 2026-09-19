@@ -35,7 +35,7 @@ use aya_ebpf::{
 
 use openxdr_common::{
     pattern_matches, ExecveEvent, FileEvent, KernelRuleArray, LSMEvent, ModuleEvent, NetworkEvent,
-    MAX_KERNEL_RULES
+    MAX_KERNEL_RULES, MAX_PATH_SCAN,
 };
 
 #[map]
@@ -97,12 +97,26 @@ fn passes_kernel_filter<const N: usize>(event_type: u8, comm: &[u8; 16], path: &
         }
         comm_len = i + 1;
     }
+    // Bound the scan below the buffer size. The verifier carries `path_len` as
+    // a scalar range, and that range is the input to every suffix offset, so a
+    // 0..512 bound is paid for downstream in states explored -- not just here.
+    // A path we cannot measure within the bound is forwarded rather than
+    // mis-measured: failing open is always permitted by the superset invariant.
+    let scan = if N < MAX_PATH_SCAN { N } else { MAX_PATH_SCAN };
     let mut path_len = 0usize;
-    for i in 0..N {
+    let mut terminated = false;
+    for i in 0..MAX_PATH_SCAN {
+        if i >= scan {
+            break;
+        }
         if path[i] == 0 {
+            terminated = true;
             break;
         }
         path_len = i + 1;
+    }
+    if !terminated {
+        return true;
     }
 
     for i in 0..MAX_KERNEL_RULES {

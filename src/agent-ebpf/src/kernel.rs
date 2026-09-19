@@ -258,7 +258,7 @@ impl EbpfKernel {
                 path_len: 0,
                 _pad: 0,
                 comm: [0; 16],
-                path: [0; 64],
+                path: [0; openxdr_common::MAX_PATTERN_LEN],
             }; openxdr_common::MAX_KERNEL_RULES],
         };
 
