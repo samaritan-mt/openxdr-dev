@@ -301,12 +301,8 @@ fn try_execve_enter(ctx: TracePointContext, filename_offset: usize) -> Result<u3
                     let end = start + 128;
                     match bpf_probe_read_user_str_bytes(arg_ptr as *const u8, &mut event.argv[start..end]) {
                         Ok(slice) => {
-                            let len = slice.len();
-                            if len > 0 && len <= 128 {
-                                event.argv[start + len - 1] = 0;
-                            } else {
-                                event.argv[start] = 0;
-                            }
+                            let _ = slice.len();
+                            event.argv[end - 1] = 0; // force null termination
                         }
                         Err(_) => { event.argv[start] = 0; }
                     }
