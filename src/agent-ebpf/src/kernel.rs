@@ -1,12 +1,14 @@
 use aya::{
     maps::perf::AsyncPerfEventArray,
     programs::{Lsm, TracePoint},
-    Btf, Ebpf,
+    Btf, Ebpf, EbpfLoader
 };
 use std::{
     collections::HashMap,
     convert::TryFrom,
 };
+use openxdr_common::{AbiOffsets};
+
 
 #[derive(Clone, Copy)]
 #[repr(transparent)]
@@ -46,8 +48,19 @@ impl EbpfKernel {
      * @param data: eBPF program data
      * @return: EbpfKernel instance
      */
-    pub fn new(data: &[u8]) -> anyhow::Result<Self> {
-        let bpf = Ebpf::load(data)?;
+    pub fn new(data: &[u8], abi: &AbiOffsets) -> anyhow::Result<Self> {
+        let bpf = EbpfLoader::new()
+        .set_global("EXECVE_FILENAME_OFF",   &abi.execve_filename,   true)
+        .set_global("EXECVEAT_FILENAME_OFF", &abi.execveat_filename, true)
+        .set_global("OPEN_FILENAME_OFF",     &abi.open_filename,     true)
+        .set_global("OPEN_FLAGS_OFF",        &abi.open_flags,        true)
+        .set_global("OPENAT_FILENAME_OFF",   &abi.openat_filename,   true)
+        .set_global("OPENAT_FLAGS_OFF",      &abi.openat_flags,      true)
+        .set_global("CONNECT_FD_OFF",        &abi.connect_fd,        true)
+        .set_global("CONNECT_ADDR_OFF",      &abi.connect_addr,      true)
+        .load(data)?;
+
+
         Ok(Self {
             bpf,
             links: HashMap::new(),
@@ -83,22 +96,23 @@ impl EbpfKernel {
         Ok(())
     }
 
-    pub fn attach_file_monitoring(&mut self) -> anyhow::Result<()> {
-        let program_open: &mut TracePoint = self
+    pub fn attach_file_monitoring(&mut self, has_open: bool, discovered: bool) -> anyhow::Result<()> {
+         if has_open {
+        // attach as today; a failure here is now a REAL error
+            let program_open: &mut TracePoint = self
             .bpf
             .program_mut("open_enter")
             .ok_or_else(|| anyhow::anyhow!("Program 'open_enter' not found"))?
             .try_into()?;
-        program_open.load()?;
-        let link_result = program_open.attach("syscalls/sys_enter_open", "");
-        match link_result {
-            Ok(link_id) => {
-                self.links.insert("open_enter".into(), link_id);
-            }
-            Err(e) => {
-                println!("Notice: sys_enter_open not found (expected on modern ARM64/kernels 5.6+): {}", e);
-            }
+            program_open.load()?;
+            let link_result = program_open.attach("syscalls/sys_enter_open", "")?;    
+        } else if discovered && cfg!(target_arch = "x86_64") {
+            anyhow::bail!("sys_enter_open missing on x86_64 - coverage hole");
+        } else {
+            println!("Notice: sys_enter_open absent (expected on aarch64)");
         }
+
+        
 
         let program_openat: &mut TracePoint = self
             .bpf

@@ -1,5 +1,24 @@
 #![no_std]
 #![no_main]
+use aya_ebpf::Global;
+
+
+#[no_mangle] 
+static EXECVE_FILENAME_OFF:   Global<u32> = Global::new(16);
+#[no_mangle] 
+static EXECVEAT_FILENAME_OFF: Global<u32> = Global::new(24);
+#[no_mangle]
+static OPEN_FILENAME_OFF:     Global<u32> = Global::new(16);
+#[no_mangle] 
+static OPEN_FLAGS_OFF:        Global<u32> = Global::new(24);
+#[no_mangle] 
+static OPENAT_FILENAME_OFF:   Global<u32> = Global::new(24);
+#[no_mangle] 
+static OPENAT_FLAGS_OFF:      Global<u32> = Global::new(32);
+#[no_mangle] 
+static CONNECT_FD_OFF:        Global<u32> = Global::new(16);
+#[no_mangle] 
+static CONNECT_ADDR_OFF:      Global<u32> = Global::new(24);
 
 use aya_ebpf::bpf_printk;
 use aya_ebpf::programs::LsmContext;
@@ -11,12 +30,12 @@ use aya_ebpf::{
     macros::{lsm, map, tracepoint},
     maps::{PerCpuArray, PerfEventArray, Array},
     programs::TracePointContext,
-    EbpfContext,
+    EbpfContext
 };
 
 use openxdr_common::{
     pattern_matches, ExecveEvent, FileEvent, KernelRuleArray, LSMEvent, ModuleEvent, NetworkEvent,
-    MAX_KERNEL_RULES, SyscallByteOffsets
+    MAX_KERNEL_RULES
 };
 
 #[map]
@@ -141,7 +160,7 @@ fn passes_kernel_filter<const N: usize>(event_type: u8, comm: &[u8; 16], path: &
  */
 #[tracepoint]
 pub fn execve_enter(ctx: TracePointContext) -> u32 {
-    let _ = try_execve_enter(ctx, 16);
+    let _ = try_execve_enter(ctx, EXECVE_FILENAME_OFF.load() as usize);
     0
 }
 
@@ -160,7 +179,7 @@ pub fn execve_enter(ctx: TracePointContext) -> u32 {
  */
 #[tracepoint]
 pub fn execveat_enter(ctx: TracePointContext) -> u32 {
-    let _ = try_execve_enter(ctx, 24);
+    let _ = try_execve_enter(ctx, EXECVEAT_FILENAME_OFF.load() as usize);
     0
 }
 
@@ -311,13 +330,13 @@ fn try_execve_enter(ctx: TracePointContext, filename_offset: usize) -> Result<u3
 
 #[tracepoint]
 pub fn open_enter(ctx: TracePointContext) -> u32 {
-    let _ = try_file_open(ctx, 24, 32);
+    let _ = try_file_open(ctx, OPEN_FILENAME_OFF.load() as usize, OPEN_FLAGS_OFF.load() as usize);
     0
 }
 
 #[tracepoint]
 pub fn openat_enter(ctx: TracePointContext) -> u32 {
-    let _ = try_file_open(ctx, 24, 32);
+    let _ = try_file_open(ctx,  OPENAT_FILENAME_OFF.load() as usize, OPENAT_FLAGS_OFF.load() as usize);
     0
 }
 
@@ -510,8 +529,8 @@ pub fn connect_enter(ctx: TracePointContext) -> i32 {
 #[inline(always)]
 fn try_connect_enter(ctx: TracePointContext) -> Result<i32, i32> {
     // Arg 0 (sockfd) is at offset 16, Arg 1 (addr ptr) is at offset 24
-    let fd: i32 = unsafe { ctx.read_at::<u64>(16).unwrap_or(0) as i32 };
-    let uservaddr: *const sockaddr = unsafe { ctx.read_at::<u64>(24).unwrap_or(0) as *const sockaddr };
+    let fd: i32 = unsafe { ctx.read_at::<u64>(CONNECT_FD_OFF.load() as usize).unwrap_or(0) as i32 };
+    let uservaddr: *const sockaddr = unsafe { ctx.read_at::<u64>(CONNECT_ADDR_OFF.load() as usize).unwrap_or(0) as *const sockaddr };
 
     let sa = match unsafe { bpf_probe_read_user(uservaddr as *const sockaddr) } {
         Ok(sa) => sa,

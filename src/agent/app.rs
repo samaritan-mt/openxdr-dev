@@ -49,9 +49,12 @@ impl App {
             )
         })?;
 
-        let mut kernel = EbpfKernel::new(&data)?;
+        let abi = agent::syscall_abi::SyscallAbi::discover();   
+        abi.report();               
+
+        let mut kernel = EbpfKernel::new(&data, &abi.return_offset_struct())?;
         kernel.attach_execve()?;
-        kernel.attach_file_monitoring()?; // Attach FIM probes
+        kernel.attach_file_monitoring(abi.has_open, abi.discovered)?; // Attach FIM probes
         kernel.attach_module_monitoring()?; // Attach kernel module probes
         kernel.attach_network()?; // Attach network probes
         kernel.attach_lsm()?; // Attach LSM probes

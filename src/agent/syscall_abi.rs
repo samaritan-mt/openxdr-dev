@@ -1,6 +1,8 @@
 
 use std::fs;
 
+use openxdr_common::AbiOffsets;
+
 /**
  * Tracepoint format is a kernel ABI that can change between kernel versions and architectures.
  * This struct is used to parse the tracepoint format and provide offsets for fields of interest.
@@ -21,6 +23,7 @@ pub struct TracepointFormat {
  * @func parse: Parses the tracepoint format from a string and returns a TracepointFormat
  * @func offset_of: Returns the offset of a field in the tracepoint format if it exists.
  */
+#[allow(dead_code)]
 impl TracepointFormat {
     /**
      * Reads the tracepoint format from the kernel and returns a TracepointFormat struct if successful.
@@ -28,14 +31,26 @@ impl TracepointFormat {
      * @returns: Option<TracepointFormat> if successful, None otherwise.
      */
 
-    pub fn read(tp: &str) -> Option<Self> {
-          for base in ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"] {
+    pub fn read(tp: &str) -> Result<Self, String> {
+        let mut parse_error = None;
+        for base in ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"] {
             let path = format!("{}/events/syscalls/{}/format", base, tp);
             if let Ok(text) = fs::read_to_string(&path) {
-                return Self::parse(&text).ok();
+                match Self::parse(&text) {
+                    Ok(format) => return Ok(format),
+                    Err(error) => {
+                        parse_error = Some(format!(
+                            "Tracepoint format for {} is unreadable: {} ({})",
+                            tp, error, path
+                        ));
+                    }
+                }
             }
         }
-        None
+        Err(parse_error.unwrap_or_else(|| format!(
+            "Tracepoint format for {} not found in tracefs",
+            tp
+        )))
     }
     /**
      * Parses the tracepoint format from a string and returns a TracepointFormat struct if successful.
@@ -63,23 +78,23 @@ impl TracepointFormat {
             //cleanup name of the field
             name = parts[0].trim().split_whitespace().last().unwrap_or("").trim_start_matches("*").split("[").next().unwrap_or("");
             let offset =parts.get(1)
-    .and_then(|p| p.split_whitespace().last())
-    .map(|s| {
-        s.trim_start_matches("offset:")
-         .trim_matches(|c: char| c.is_whitespace() || c == ',' || c == ';') // Cleans up trailing fluff
-    })
-    .ok_or_else(|| "Missing offset field in parts".to_string())? 
-    .parse::<u16>()
-    .map_err(|e| format!("Failed to parse offset: {e}"))?;
+                .and_then(|p| p.split_whitespace().last())
+                .map(|s| {
+                    s.trim_start_matches("offset:")
+                    .trim_matches(|c: char| c.is_whitespace() || c == ',' || c == ';') // Cleans up trailing fluff
+                })
+                .ok_or_else(|| "Missing offset field in parts".to_string())? 
+                .parse::<u16>()
+                .map_err(|e| format!("Failed to parse offset: {e}"))?;
             let size = parts.get(2)
-    .and_then(|p| p.split_whitespace().last())
-    .map(|s| {
-        s.trim_start_matches("size:")
-         .trim_matches(|c: char| c.is_whitespace() || c == ',' || c == ';') // Cleans up trailing fluff
-    })
-    .ok_or_else(|| "Missing size field in parts".to_string())? 
-    .parse::<u16>()
-    .map_err(|e| format!("Failed to parse offset: {e}"))?;
+                .and_then(|p| p.split_whitespace().last())
+                .map(|s| {
+                    s.trim_start_matches("size:")
+                    .trim_matches(|c: char| c.is_whitespace() || c == ',' || c == ';') // Cleans up trailing fluff
+                })
+                .ok_or_else(|| "Missing size field in parts".to_string())? 
+                .parse::<u16>()
+                .map_err(|e| format!("Failed to parse offset: {e}"))?;
         
             fields.push((name.to_string(), offset, size));
         }
@@ -150,7 +165,8 @@ impl SyscallAbi {
         abi.has_open = false;
 
         for tp in tracepoints {
-            if let Some(fmt) = TracepointFormat::read(&tp) {
+            match TracepointFormat::read(&tp) {
+                Ok(fmt) => {
                 let fmt_opt = Some(fmt.clone());
                 match tp.as_str() {
                 "sys_enter_execve" => {
@@ -175,8 +191,10 @@ impl SyscallAbi {
                     _ => {}
                 }
                 abi.discovered = true;
-            } else {
-                diagnostics.push(format!("Tracepoint format for {} not found, using fallback offsets.", tp));
+                }
+                Err(error) => {
+                    diagnostics.push(format!("{}, using fallback offsets.", error));
+                }
             }
         }
         abi.diagnostics = diagnostics;
@@ -218,6 +236,20 @@ impl SyscallAbi {
         for d in &self.diagnostics {
             println!("  ! {}", d);
         }
+    }
+
+    pub fn return_offset_struct(&self) -> AbiOffsets {
+        let offsets = AbiOffsets {
+            execve_filename:    self.execve_filename,
+            execveat_filename:  self.execveat_filename,
+            open_filename:      self.open_filename,
+            open_flags:         self.open_flags,
+            openat_filename:    self.openat_filename,
+            openat_flags:       self.openat_flags,
+            connect_fd:         self.connect_fd,
+            connect_addr:       self.connect_addr,
+        };
+        offsets
     }
 }
 
