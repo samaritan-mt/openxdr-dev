@@ -153,88 +153,91 @@ pub struct KernelRuleArray {
 /// callers pass power-of-two buffers (512 for execve/LSM, 128 for openat),
 /// which `debug_assert` guards at build time.
 #[inline(always)]
-pub fn pattern_matches<const N: usize>(
+pub fn pattern_matches<const N: usize, const M: usize>(
     hay: &[u8; N],
     hay_len: usize,
-    pat: &[u8],
+    pat: &[u8; M],
     pat_len: usize,
     kind: u8,
 ) -> bool {
-    if pat_len == 0 || pat_len > pat.len() || pat_len > hay_len {
+    // Cheap rejects, once per rule. `hay_len <= N` always (it is produced by a
+    // scan bounded by N), so these also guarantee `pat_len <= N` below.
+    if pat_len == 0 || pat_len > M || pat_len > hay_len {
+        return false;
+    }
+    if kind == MATCH_EXACT && pat_len != hay_len {
         return false;
     }
 
-    // The `kind` branch is taken ONCE per rule, not once per byte. That
-    // separation is the whole point of this shape.
-    //
-    // `kind` comes from map data, so the verifier cannot know it is
-    // MATCH_EXACT even when every loaded rule is. If the comparison index were
-    // computed from `kind` inside the loop, the verifier would have to carry
-    // the suffix case's dynamic offset -- a scalar *range*, since it derives
-    // from `hay_len` -- through every byte of every rule. That is what blew the
-    // 1M instruction budget: `r1 &= 511` with `R7=scalar(smin=22,smax=51)` and
-    // 30k+ scalar ids minted. See docs/verifier_complexity_budget.md.
     if kind == MATCH_SUFFIX {
         suffix_matches(hay, hay_len, pat, pat_len)
     } else {
-        // MATCH_EXACT additionally pins the length; MATCH_PREFIX and any
-        // unrecognised kind degrade to a prefix compare, which is a superset
-        // of exact and therefore never a miss.
-        if kind == MATCH_EXACT && pat_len != hay_len {
-            return false;
-        }
+        // MATCH_PREFIX, and any unrecognised kind, degrade to prefix -- a
+        // superset of exact, so never a miss.
         prefix_matches(hay, pat, pat_len)
     }
 }
 
-/// Anchored-at-zero compare. The index is a plain loop counter bounded by a
-/// constant, so the verifier tracks it as a scalar with a known range and the
-/// access folds to a simple bounded array read -- no mask, no arithmetic on a
-/// runtime value. This is the cheap path, and today every rule the corpus
-/// lowers into the kernel takes it.
+/// Branchless anchored-at-zero compare.
+///
+/// The loop runs a fixed `M` iterations of straight-line code: no `break` on a
+/// runtime value, no early `return`, no branch per byte. That is the point.
+///
+/// The previous version exited early on the first mismatch, which reads as an
+/// optimisation and is the opposite for the verifier: two branch arms per byte,
+/// times `M` bytes, times two fields, times every rule -- and no pruning
+/// between rules, because `pat_len` is map data and therefore a fresh unknown
+/// each time. Measured cost of the branching version was >1M instructions with
+/// `max_states_per_insn` 238. Accumulating into `diff` collapses that to one
+/// path. See docs/verifier_complexity_budget.md.
 #[inline(always)]
-fn prefix_matches<const N: usize>(hay: &[u8; N], pat: &[u8], pat_len: usize) -> bool {
-    for j in 0..MAX_PATTERN_LEN {
-        // Both bounds are compile-time constants against a loop counter.
-        if j >= pat_len || j >= N {
-            break;
+fn prefix_matches<const N: usize, const M: usize>(
+    hay: &[u8; N],
+    pat: &[u8; M],
+    pat_len: usize,
+) -> bool {
+    let mut diff = 0u8;
+    for j in 0..M {
+        if j >= N {
+            break; // constant vs constant: folded at compile time, not a runtime branch
         }
-        if hay[j] != pat[j] {
-            return false;
-        }
+        // 0xFF while inside the pattern, 0x00 past it. Bytes past `pat_len`
+        // contribute nothing instead of being skipped by a jump.
+        let active = ((j < pat_len) as u8).wrapping_neg();
+        diff |= (hay[j] ^ pat[j]) & active;
     }
-    true
+    diff == 0
 }
 
-/// Anchored-at-end compare. `start` derives from `hay_len`, so the index is a
-/// runtime scalar and must be masked to stay provably in range -- which is
-/// only sound because every haystack buffer is a power of two (512 execve/LSM,
-/// 128 openat, 16 comm).
+/// Branchless anchored-at-end compare.
 ///
-/// This is the expensive path. When suffix rules do start reaching the kernel
-/// and this shows up in a verifier budget, the fix is to reverse the haystack
-/// into scratch once per event and store patterns pre-reversed at lowering
-/// time, turning every suffix compare back into `prefix_matches`.
+/// Same shape as `prefix_matches`, but the index derives from `hay_len` and so
+/// is a runtime scalar; the mask keeps it provably in range, which is sound
+/// only because every haystack buffer is a power of two (512 execve/LSM, 128
+/// openat, 16 comm).
+///
+/// This remains the expensive path. When suffix rules actually reach the
+/// kernel, reverse the haystack into scratch once per event and store patterns
+/// pre-reversed at lowering time, which turns every suffix compare back into
+/// `prefix_matches`.
 #[inline(always)]
-fn suffix_matches<const N: usize>(
+fn suffix_matches<const N: usize, const M: usize>(
     hay: &[u8; N],
     hay_len: usize,
-    pat: &[u8],
+    pat: &[u8; M],
     pat_len: usize,
 ) -> bool {
     debug_assert!(N.is_power_of_two());
     let start = hay_len - pat_len; // pat_len <= hay_len checked by the caller
-    for j in 0..MAX_PATTERN_LEN {
-        if j >= pat_len {
-            break;
-        }
+    let mut diff = 0u8;
+    for j in 0..M {
+        let active = ((j < pat_len) as u8).wrapping_neg();
         let idx = (start + j) & (N - 1);
-        if hay[idx] != pat[j] {
-            return false;
-        }
+        diff |= (hay[idx] ^ pat[j]) & active;
     }
-    true
+    diff == 0
 }
+
 
 #[cfg(test)]
 mod tests {
